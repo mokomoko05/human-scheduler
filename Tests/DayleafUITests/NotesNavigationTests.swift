@@ -93,3 +93,70 @@ final class NotesNavigationTests: XCTestCase {
         controller.close()
     }
 }
+
+@MainActor
+final class DraftKeepingTests: XCTestCase {
+    private static var keepAlive: [AnyObject] = []
+    private let day = JournalDates.calendar.date(from: DateComponents(year: 2026, month: 10, day: 7))!
+
+    private func makeStore() throws -> (JournalStore, ScheduledTask, ScheduledTask) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = JournalStore(directory: directory)
+        return (store, try XCTUnwrap(store.addParsedTodo("读论文", on: day)), try XCTUnwrap(store.addParsedTodo("写周报", on: day)))
+    }
+
+    func testNoteDraftsAreKeptPerTaskAndPerTagAndClearedOnlyOnSubmitOrWhenEmpty() throws {
+        let (_, a, b) = try makeStore()
+        let nav = NotesNavigation()
+        let keyA = NotesNavigation.draftKey(task: a.id), keyB = NotesNavigation.draftKey(task: b.id)
+        let tagKey = NotesNavigation.draftKey(tag: "论文")
+        nav.updateDraft(keyA) { $0.text = "写到一半的想法" }
+        nav.updateDraft(keyB) { $0.text = "另一个"; $0.images = ["x.png"] }
+        nav.updateDraft(tagKey) { $0.text = "笔记本里的"; $0.link = a.id }
+        nav.open(task: b.id)
+        nav.open(tag: "论文")
+        nav.open(task: a.id)
+        XCTAssertEqual(nav.draft(keyA).text, "写到一半的想法", "切到别处再回来，草稿还在")
+        XCTAssertEqual(nav.draft(keyB).images, ["x.png"], "图片也在")
+        XCTAssertEqual(nav.draft(tagKey).link, a.id, "标签页里选的关联待办也在")
+        XCTAssertEqual(NotesNavigation.draftKey(tag: "论文"), NotesNavigation.draftKey(tag: "论文".uppercased()), "标签不区分大小写")
+        nav.updateDraft(keyA) { $0.text = "   " }
+        XCTAssertTrue(nav.draft(keyA).isEmpty)
+        XCTAssertNil(nav.drafts[keyA], "空白草稿不占位")
+        nav.clearDraft(keyB)
+        XCTAssertTrue(nav.draft(keyB).isEmpty)
+    }
+
+    func testDraftsSurviveClosingAndReopeningTheNotesWindow() throws {
+        let (store, a, _) = try makeStore()
+        let nav = NotesNavigation()
+        let controller = NotesWindowController(nav: nav)
+        Self.keepAlive.append(controller)
+        controller.show(store: store, taskID: a.id, reveal: { _ in }, openDay: { _ in })
+        nav.updateDraft(NotesNavigation.draftKey(task: a.id)) { $0.text = "去别的应用复制点东西" }
+        controller.close()
+        controller.show(store: store, taskID: nil, reveal: { _ in }, openDay: { _ in })
+        XCTAssertEqual(nav.draft(NotesNavigation.draftKey(task: a.id)).text, "去别的应用复制点东西")
+        controller.close()
+    }
+
+    func testQuickCaptureDraftIsHeldByTheModelUntilSubmitted() {
+        let model = QuickCaptureModel()
+        XCTAssertFalse(model.hasDraft)
+        model.text = "  "
+        XCTAssertFalse(model.hasDraft, "只有空白不算草稿")
+        model.text = "复制来的一大段"
+        model.images = ["a.png"]
+        model.tags = ["论文"]
+        model.pendingTag = "没回车的新标"
+        XCTAssertTrue(model.hasDraft)
+        model.mode = .log
+        XCTAssertEqual(model.text, "复制来的一大段", "切换模式不丢")
+        model.clearDraft()
+        XCTAssertFalse(model.hasDraft)
+        XCTAssertTrue(model.images.isEmpty && model.tags.isEmpty && model.pendingTag.isEmpty)
+        model.tags = ["仅标签"]
+        XCTAssertTrue(model.hasDraft, "只选了标签也算草稿")
+    }
+}

@@ -74,6 +74,23 @@ enum QuickCaptureMode: String { case todo, log }
 @MainActor
 final class QuickCaptureModel: ObservableObject {
     @Published var mode: QuickCaptureMode = .todo
+    /// 草稿：窗口一失焦就会关闭（比如去别的应用复制东西），所以文字、图片、标签放在这里，窗口关掉再打开仍在，只有成功提交才清空。
+    @Published var text = ""
+    @Published var images: [String] = []
+    @Published var tags: [String] = []
+    /// 标签栏里「新标签」输入框里写了一半的字。
+    @Published var pendingTag = ""
+
+    var hasDraft: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty || !tags.isEmpty
+    }
+
+    func clearDraft() {
+        text = ""
+        images = []
+        tags = []
+        pendingTag = ""
+    }
 }
 
 private final class QuickPanel: NSPanel {
@@ -257,13 +274,15 @@ struct QuickCaptureView: View {
     @ObservedObject var model: QuickCaptureModel
     let close: () -> Void
     let resize: (CGFloat) -> Void
-    @State private var images: [String] = []
-    @State private var text = ""
+    @State private var restored = false
     @State private var focused = true
     @State private var message: String?
     @State private var failure: String?
+    /// 草稿都在 model 里（窗口关掉也不丢）。
+    private var text: String { get { model.text } nonmutating set { model.text = newValue } }
+    private var images: [String] { get { model.images } nonmutating set { model.images = newValue } }
     /// 这条日志要带的标签（不需要关联待办）。
-    @State private var tags: [String] = []
+    private var tags: [String] { get { model.tags } nonmutating set { model.tags = newValue } }
 
     private var mode: QuickCaptureMode {
         get { model.mode }
@@ -290,7 +309,7 @@ struct QuickCaptureView: View {
             }
             HStack(spacing: 8) {
                 Image(systemName: mode == .todo ? "plus.circle" : "chevron.right.2").foregroundStyle(Palette.accent)
-                TaskInput(text: $text, focused: $focused,
+                TaskInput(text: $model.text, focused: $focused,
                           placeholder: mode == .todo ? "添加待办，例如：明天 15:00 开会 #项目A" : "记录…，或 /done /block /plan 开头；⌘V 粘贴图片",
                           fontSize: 16, submit: submit, cancel: close, complete: { mode = mode == .todo ? .log : .todo },
                           onPasteImages: mode == .log ? addImages : nil,
@@ -303,12 +322,18 @@ struct QuickCaptureView: View {
                                    remove: { name in images.removeAll { $0 == name } },
                                    preview: { NSWorkspace.shared.open(store.imageURL(images[$0])) })
             }
-            if mode == .log { TagSelectionBar(store: store, selection: $tags) }
+            if mode == .log { TagSelectionBar(store: store, selection: $model.tags, draftBinding: $model.pendingTag) }
             Group {
                 if let message {
                     Label(message, systemImage: "checkmark.circle.fill").foregroundStyle(Palette.success)
                 } else if let failure {
                     Label(failure, systemImage: "exclamationmark.triangle").foregroundStyle(Palette.deadline)
+                } else if restored, model.hasDraft {
+                    HStack(spacing: 6) {
+                        Label("已恢复上次没发送的草稿", systemImage: "arrow.uturn.backward.circle").foregroundStyle(Palette.muted)
+                        Button("清空") { model.clearDraft(); restored = false; focused = true }
+                            .buttonStyle(.plain).foregroundStyle(Palette.accent)
+                    }
                 } else if mode == .todo, parsed.hasSchedule || !parsed.tags.isEmpty {
                     ParsedChips(parsed: parsed)
                 } else {
@@ -331,6 +356,8 @@ struct QuickCaptureView: View {
         .background(GeometryReader { proxy in Color.clear.preference(key: PanelHeightKey.self, value: proxy.size.height) })
         .onPreferenceChange(PanelHeightKey.self) { resize($0) }
         .onChange(of: mode) { _ in failure = nil; focused = true }
+        .onChange(of: model.text) { _ in restored = false }
+        .onAppear { restored = model.hasDraft }
     }
 
     private func addImages(_ datas: [Data]) {
@@ -355,6 +382,8 @@ struct QuickCaptureView: View {
                 message = (images.isEmpty ? "已记录" : "已记录，含 \(images.count) 张图片") + focus
                     + (tags.isEmpty ? "" : "，标签 " + tags.map { "#" + $0 }.joined(separator: " "))
                 images = []
+                tags = []
+                model.pendingTag = ""
                 ImageIndexer.run(store: store)
             } catch { failure = error.localizedDescription; return }
         }

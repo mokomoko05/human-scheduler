@@ -15,16 +15,11 @@ struct NotesView: View {
     @State private var creatingTag = false
     @State private var newTagName = ""
     @State private var newTagMessage: String?
-    @State private var tagDraft = ""
-    @State private var tagDraftImages: [String] = []
-    @State private var tagLink: UUID?
     @State private var tagFocused = false
     @State private var editingNoteID: UUID?
     @State private var noteEditText = ""
     @State private var noteEditFocused = false
     @State private var previewing: ImagePreviewItem?
-    @State private var draft = ""
-    @State private var draftImages: [String] = []
     @State private var focused = false
     @State private var error: String?
 
@@ -32,6 +27,17 @@ struct NotesView: View {
     private var tagSelection: String? { get { nav.tagSelection } nonmutating set { nav.tagSelection = newValue } }
     private var query: String { nav.query }
     private var chapterView: Bool { nav.chapterView }
+
+    // 草稿按「当前任务 / 当前标签」分开存在 nav 里：切换、关窗口、失焦都不丢。
+    private func taskDraftKey(_ id: UUID) -> String { NotesNavigation.draftKey(task: id) }
+    private func tagDraftKey(_ tag: String) -> String { NotesNavigation.draftKey(tag: tag) }
+
+    private func textBinding(_ key: String) -> Binding<String> {
+        Binding(get: { nav.draft(key).text }, set: { value in nav.updateDraft(key) { $0.text = value } })
+    }
+    private func images(_ key: String) -> [String] { nav.draft(key).images }
+    private func addImages(_ names: [String], to key: String) { nav.updateDraft(key) { $0.images += names } }
+    private func removeImage(_ name: String, from key: String) { nav.updateDraft(key) { $0.images.removeAll { $0 == name } } }
 
     /// 明确指定了任务或标签（比如点了待办上的标签）就跳过去；否则保持 `nav` 里上次停留的位置。
     init(store: JournalStore, initialSelection: UUID? = nil, initialTag: String? = nil, nav: NotesNavigation? = nil,
@@ -181,13 +187,13 @@ struct NotesView: View {
     private func select(task id: UUID) {
         selection = id
         tagSelection = nil
-        draft = ""; draftImages = []; error = nil
+        error = nil
     }
 
     private func select(tag: String) {
         tagSelection = tag
         selection = nil
-        draft = ""; draftImages = []; tagDraft = ""; tagDraftImages = []; tagLink = nil; error = nil
+        error = nil
     }
 
     private func tagRow(_ summary: JournalStore.TagSummary) -> some View {
@@ -535,32 +541,36 @@ struct NotesView: View {
 
     /// 标签页底部：直接往这个笔记本里写，不需要关联待办；也可以顺手选一个待办作为它的章节。
     private func tagComposer(_ tag: String) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if !tagDraftImages.isEmpty {
-                PendingImagesStrip(store: store, names: tagDraftImages,
-                                   remove: { name in tagDraftImages.removeAll { $0 == name } },
-                                   preview: { previewing = ImagePreviewItem(names: tagDraftImages, index: $0) })
+        let key = tagDraftKey(tag)
+        let pending = images(key)
+        let link = nav.draft(key).link
+        let text = nav.draft(key).text
+        return VStack(alignment: .leading, spacing: 6) {
+            if !pending.isEmpty {
+                PendingImagesStrip(store: store, names: pending,
+                                   remove: { name in removeImage(name, from: key) },
+                                   preview: { previewing = ImagePreviewItem(names: pending, index: $0) })
             }
             HStack(spacing: 8) {
                 Image(systemName: "square.and.pencil").foregroundStyle(Palette.accent)
-                TaskInput(text: $tagDraft, focused: $tagFocused,
+                TaskInput(text: textBinding(key), focused: $tagFocused,
                           placeholder: "写进 #\(tag)，回车保存，⌘V 粘贴图片",
                           fontSize: 13, submit: { submitTag(tag) }, onPasteImages: { datas in
-                    tagDraftImages += ImageTools.save(datas, in: store)
+                    addImages(ImageTools.save(datas, in: store), to: key)
                     tagFocused = true
                 }, minHeight: 24, maxLines: 10).disabled(store.isReadOnly)
-                LinkPickerButton(store: store, current: tagLink, pick: { tagLink = $0 }) {
-                    Label(tagLink.flatMap { store.locate($0) }.map { FocusHint.label($0) } ?? "关联待办（可选）", systemImage: "link")
+                LinkPickerButton(store: store, current: link, pick: { picked in nav.updateDraft(key) { $0.link = picked } }) {
+                    Label(link.flatMap { store.locate($0) }.map { FocusHint.label($0) } ?? "关联待办（可选）", systemImage: "link")
                         .font(.system(size: 11)).lineLimit(1).frame(maxWidth: 190)
-                        .foregroundStyle(tagLink == nil ? Palette.muted : Palette.accent)
+                        .foregroundStyle(link == nil ? Palette.muted : Palette.accent)
                 }.fixedSize().disabled(store.isReadOnly).help("把这条记在某个待办（章节）名下；不选就是直接记在笔记本里")
                 Button { submitTag(tag) } label: { Image(systemName: "arrow.turn.down.left") }
                     .buttonStyle(HitAreaButtonStyle())
-                    .disabled(store.isReadOnly || (tagDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && tagDraftImages.isEmpty))
+                    .disabled(store.isReadOnly || (text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pending.isEmpty))
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(Palette.card, in: RoundedRectangle(cornerRadius: 8))
-            if let focus = store.focusTask, tagLink == nil {
+            if let focus = store.focusTask, link == nil {
                 Text("专注中：不选待办时，这条会关联到 \(FocusHint.label(focus))").font(.system(size: 11)).foregroundStyle(Palette.muted)
             }
             if let error {
@@ -571,14 +581,14 @@ struct NotesView: View {
     }
 
     private func submitTag(_ tag: String) {
-        let text = tagDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty || !tagDraftImages.isEmpty else { return }
+        let key = tagDraftKey(tag)
+        let draft = nav.draft(key)
+        let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty || !draft.images.isEmpty else { return }
         do {
-            let command = try store.quickLog(text, images: tagDraftImages, taskID: tagLink, tags: [tag], on: Date())
+            let command = try store.quickLog(text, images: draft.images, taskID: draft.link, tags: [tag], on: Date())
             guard case .entry = command else { error = "这里只能写笔记，不支持 \(text) 这类命令。"; return }
-            tagDraft = ""
-            tagDraftImages = []
-            tagLink = nil
+            nav.clearDraft(key)
             error = nil
             tagFocused = true
             ImageIndexer.run(store: store)
@@ -607,23 +617,26 @@ struct NotesView: View {
     }
 
     private func composer(_ topic: JournalStore.NoteTopic) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if !draftImages.isEmpty {
-                PendingImagesStrip(store: store, names: draftImages,
-                                   remove: { name in draftImages.removeAll { $0 == name } },
-                                   preview: { previewing = ImagePreviewItem(names: draftImages, index: $0) })
+        let key = taskDraftKey(topic.id)
+        let pending = images(key)
+        let text = nav.draft(key).text
+        return VStack(alignment: .leading, spacing: 6) {
+            if !pending.isEmpty {
+                PendingImagesStrip(store: store, names: pending,
+                                   remove: { name in removeImage(name, from: key) },
+                                   preview: { previewing = ImagePreviewItem(names: pending, index: $0) })
             }
             HStack(spacing: 8) {
                 Image(systemName: "square.and.pencil").foregroundStyle(Palette.accent)
-                TaskInput(text: $draft, focused: $focused,
+                TaskInput(text: textBinding(key), focused: $focused,
                           placeholder: topic.deleted ? "任务已删除，无法追加笔记" : "给 \(topic.number.map { "#\($0)" } ?? "这个任务") 追加笔记，回车保存，⌘V 粘贴图片",
                           fontSize: 13, submit: { submit(topic) }, onPasteImages: { datas in
-                    draftImages += ImageTools.save(datas, in: store)
+                    addImages(ImageTools.save(datas, in: store), to: key)
                     focused = true
                 }, minHeight: 24, maxLines: 10).disabled(topic.deleted || store.isReadOnly)
                 Button { submit(topic) } label: { Image(systemName: "arrow.turn.down.left") }
                     .buttonStyle(HitAreaButtonStyle())
-                    .disabled(topic.deleted || store.isReadOnly || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draftImages.isEmpty))
+                    .disabled(topic.deleted || store.isReadOnly || (text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pending.isEmpty))
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(Palette.card, in: RoundedRectangle(cornerRadius: 8))
@@ -635,13 +648,14 @@ struct NotesView: View {
     }
 
     private func submit(_ topic: JournalStore.NoteTopic) {
-        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty || !draftImages.isEmpty else { return }
+        let key = taskDraftKey(topic.id)
+        let draft = nav.draft(key)
+        let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty || !draft.images.isEmpty else { return }
         do {
-            let command = try store.quickLog(text, images: draftImages, taskID: topic.id, on: Date())
+            let command = try store.quickLog(text, images: draft.images, taskID: topic.id, on: Date())
             guard case .entry = command else { error = "这里只能写笔记，不支持 \(text) 这类命令。"; return }
-            draft = ""
-            draftImages = []
+            nav.clearDraft(key)
             error = nil
             focused = true
             ImageIndexer.run(store: store)

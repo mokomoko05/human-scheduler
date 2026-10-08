@@ -1,6 +1,15 @@
 import Foundation
 import DayleafCore
 
+/// 笔记输入框里没发送的内容：文字、图片、可选关联的待办。
+struct NoteDraft: Equatable {
+    var text = ""
+    var images: [String] = []
+    var link: UUID?
+
+    var isEmpty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty && link == nil }
+}
+
 /// 笔记窗口停在哪里：选中的任务或标签、搜索词、标签页按待办还是按日期看。
 /// 每次变化都存进偏好，所以关掉窗口甚至退出应用再打开，都回到上次的位置，不用重新搜索。
 @MainActor
@@ -12,6 +21,21 @@ final class NotesNavigation: ObservableObject {
     @Published var tagSelection: String? { didSet { save() } }
     @Published var query: String { didSet { save() } }
     @Published var chapterView: Bool { didSet { save() } }
+    /// 每个任务、每个标签各有一份没发送的草稿（只在应用运行期间保留）：切到别处、关掉窗口、去别的应用复制东西，回来都还在。
+    @Published private(set) var drafts: [String: NoteDraft] = [:]
+
+    static func draftKey(task id: UUID) -> String { "task:" + id.uuidString }
+    static func draftKey(tag: String) -> String { "tag:" + TagText.key(tag) }
+
+    func draft(_ key: String) -> NoteDraft { drafts[key] ?? NoteDraft() }
+
+    func updateDraft(_ key: String, _ change: (inout NoteDraft) -> Void) {
+        var value = draft(key)
+        change(&value)
+        if value.isEmpty { drafts[key] = nil } else if drafts[key] != value { drafts[key] = value }
+    }
+
+    func clearDraft(_ key: String) { drafts[key] = nil }
 
     /// `defaults` 为 nil 时只在内存里（测试、一次性的视图）。
     init(defaults: UserDefaults? = nil, prefix: String = "notes.nav") {

@@ -129,8 +129,11 @@ struct TagSelectionBar: View {
     @ObservedObject var store: JournalStore
     @Binding var selection: [String]
     var maxVisible = 12
+    /// 「新标签」输入框里的字；传入时由调用方保存（窗口关掉也不丢），不传就只在这个视图里。
+    var draftBinding: Binding<String>?
     @State private var creating = false
-    @State private var draft = ""
+    @State private var localDraft = ""
+    private var draft: Binding<String> { draftBinding ?? $localDraft }
     @State private var message: String?
     @FocusState private var typing: Bool
 
@@ -146,13 +149,13 @@ struct TagSelectionBar: View {
     }
 
     private func create() {
-        let tags = TagText.parseList(draft)
-        guard !tags.isEmpty else { message = draft.isEmpty ? nil : "标签不能含空格，也不能是纯数字"; return }
+        let tags = TagText.parseList(draft.wrappedValue)
+        guard !tags.isEmpty else { message = draft.wrappedValue.isEmpty ? nil : "标签不能含空格，也不能是纯数字"; return }
         for tag in tags {
             let name = store.createTag(tag) ?? tag
             if !isSelected(name) { selection.append(name) }
         }
-        draft = ""
+        draft.wrappedValue = ""
         message = nil
         creating = false
     }
@@ -171,9 +174,9 @@ struct TagSelectionBar: View {
                         .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Palette.line, style: StrokeStyle(lineWidth: 1, dash: [3])))
                 }.buttonStyle(.plain).foregroundStyle(Palette.muted)
             }
-            if creating {
+            if creating || !draft.wrappedValue.isEmpty {
                 HStack(spacing: 6) {
-                    TextField("新标签名，回车创建（可用 / 分层）", text: $draft).textFieldStyle(.plain).focused($typing).onSubmit(create)
+                    TextField("新标签名，回车创建（可用 / 分层）", text: draft).textFieldStyle(.plain).focused($typing).onSubmit(create)
                         .padding(.horizontal, 8).padding(.vertical, 4)
                         .background(Palette.card, in: RoundedRectangle(cornerRadius: 6))
                     if let message { Text(message).font(.caption).foregroundStyle(.orange) }
