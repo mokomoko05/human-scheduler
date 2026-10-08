@@ -35,7 +35,7 @@ final class TaskTextTests: XCTestCase {
     }
 
     func testEurosysFileAliasAndPathsWithSpaces() throws {
-        let address = "file:///Users/huangyilusmac/Reading/eurosys27-extra-paper1384.pdf"
+        let address = "file:///Users/example/Reading/eurosys27-extra-paper1384.pdf"
         let rendered = TaskText.rendered("[eurosys](\(address))")
         XCTAssertEqual(String(rendered.characters), "eurosys")
         XCTAssertEqual(rendered.runs.compactMap(\.link), [URL(string: address)!])
@@ -66,7 +66,7 @@ final class TaskTextTests: XCTestCase {
     }
 
     func testCalendarAliasIsLiteralAndKeepsSingleFileLink() {
-        let address = "file:///Users/huangyilusmac/Reading/eurosys27-extra-paper1384.pdf"
+        let address = "file:///Users/example/Reading/eurosys27-extra-paper1384.pdf"
         let source = "阅读全文 [eurosys](\(address)) 并整理笔记"
         let rendered = TaskText.rendered(source, alias: "[EuroSys] *阅读*")
         XCTAssertEqual(String(rendered.characters), "[EuroSys] *阅读*")

@@ -5,7 +5,7 @@ import XCTest
 final class EditingInteractionTests: XCTestCase {
     @MainActor
     func testPDFAndWebLinksChooseSafari() async {
-        XCTAssertTrue(SafariLinks.usesSafari(URL(fileURLWithPath: "/Users/huangyilusmac/Reading/eurosys27-extra-paper1384.pdf")))
+        XCTAssertTrue(SafariLinks.usesSafari(URL(fileURLWithPath: "/Users/example/Reading/eurosys27-extra-paper1384.pdf")))
         XCTAssertTrue(SafariLinks.usesSafari(URL(fileURLWithPath: "/tmp/论文.PDF")))
         XCTAssertTrue(SafariLinks.usesSafari(URL(string: "https://example.com")!))
         XCTAssertFalse(SafariLinks.usesSafari(URL(fileURLWithPath: "/tmp/notes.txt")))
@@ -89,7 +89,7 @@ final class EditingInteractionTests: XCTestCase {
 
     @MainActor
     func testEurosysNativeLinkOpensWithoutEnteringEditing() async throws {
-        let address = "file:///Users/huangyilusmac/Reading/eurosys27-extra-paper1384.pdf"
+        let address = "file:///Users/example/Reading/eurosys27-extra-paper1384.pdf"
         let text = TaskLinkText.styledText("[eurosys](\(address))", completed: false, color: .labelColor, fontSize: 13)
         let view = InteractiveTaskText(frame: NSRect(x: 0, y: 0, width: 240, height: 40))
         view.isEditable = false
