@@ -390,20 +390,11 @@ struct DailyLogView: View {
                     .frame(maxWidth: .infinity, minHeight: geometry.size.height, alignment: .topLeading)
                 }
                 .background(TerminalPalette.surface)
-                .onAppear { scrollToLatest(proxy) }
-                .onChange(of: entry.logs.count) { _ in if focused { scrollToLatest(proxy, settle: false) } }
-                .onChange(of: geometry.size.height) { _ in scrollToLatest(proxy, settle: false) }
+                // 打开时不滚动，停在顶部。只有自己刚写了一条新日志时，才跟到那一条。
+                .onChange(of: entry.logs.count) { [count = entry.logs.count] new in
+                    if focused, new > count { withAnimation(Motion.quick) { proxy.scrollTo("tail", anchor: .bottom) } }
+                }
             }
-        }
-    }
-
-    /// 滚到最新一条。行是惰性布局的，刚出现时行高还是估算值，一次 scrollTo 会落在错位的地方（看上去是空的），
-    /// 所以布局稳定的几个时间点再校正一次。
-    private func scrollToLatest(_ proxy: ScrollViewProxy, settle: Bool = true) {
-        proxy.scrollTo("tail", anchor: .bottom)
-        guard settle else { return }
-        for delay in [0.05, 0.2, 0.5] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { proxy.scrollTo("tail", anchor: .bottom) }
         }
     }
 

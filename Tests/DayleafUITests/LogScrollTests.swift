@@ -40,13 +40,15 @@ final class LogScrollTests: XCTestCase {
         return (scroll, host)
     }
 
-    func testLongDayOpensScrolledToTheNewestLogNotSomewhereInTheMiddle() throws {
-        let (scroll, _) = try open(logCount: 300)
+    func testLongDayOpensAtTheTopAndStaysThereWithoutScrolling() throws {
+        let (scroll, host) = try open(logCount: 300)
         let document = try XCTUnwrap(scroll.documentView)
-        let visible = scroll.contentView.bounds
-        XCTAssertGreaterThan(document.frame.height, visible.height * 3, "内容远比窗口长")
-        let bottomGap = document.frame.height - visible.maxY
-        XCTAssertLessThan(abs(bottomGap), 40, "打开时停在底部（最新一条），离底部 \(bottomGap)pt")
+        XCTAssertGreaterThan(document.frame.height, scroll.contentView.bounds.height * 3, "内容远比窗口长")
+        XCTAssertEqual(scroll.contentView.bounds.minY, 0, accuracy: 1, "打开时停在顶部")
+        // 再等一会儿：不能“顿一下然后自己滚到底”。
+        RunLoop.main.run(until: Date().addingTimeInterval(1.2))
+        host.layoutSubtreeIfNeeded()
+        XCTAssertEqual(scroll.contentView.bounds.minY, 0, accuracy: 1, "之后也不会自己滚动")
     }
 
     func testShortDayIsTopAlignedWithNothingScrolledAway() throws {
