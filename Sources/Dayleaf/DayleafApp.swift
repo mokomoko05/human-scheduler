@@ -1,0 +1,526 @@
+import AppKit
+import Carbon.HIToolbox
+import SwiftUI
+import DayleafCore
+
+@main
+enum DayleafApp {
+    @MainActor
+    static func main() {
+        if CommandLine.arguments.contains("--configure-login") {
+            let loginItem = LoginItem()
+            loginItem.setEnabled(true)
+            if let error = loginItem.errorMessage {
+                print(error)
+            } else {
+                print("登录启动已启用。")
+            }
+            if !loginItem.enabled { exit(1) }
+            return
+        }
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        application.setActivationPolicy(.regular)
+        withExtendedLifetime(delegate) { application.run() }
+    }
+}
+
+/// 菜单项携带的动作：普通命令、带勾选状态的偏好开关，以及「输入文字时不可用」的标记。
+private final class MenuAction: NSObject {
+    let run: () -> Void
+    var toggleKey: String?
+    var toggleDefault = false
+    var disabledWhileTyping = false
+    /// 内置终端在前台时让出按键（比如 ⌃N 在 shell 里是下一条历史，⌃M 是回车）。
+    var disabledInTerminal = false
+    init(_ run: @escaping () -> Void) { self.run = run }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
+    private var window: NSWindow!
+    private var store: JournalStore!
+    private var schedulerServer: SchedulerServer?
+    private var schedulerService: SchedulerService?
+    private var reminders: ReminderScheduler!
+    private var loginItem: LoginItem!
+    private var quickCapture: QuickCaptureController!
+    private var settings: SettingsWindowController!
+    private var undoItem: NSMenuItem?
+    private var keyMonitor: Any?
+    /// 用全局快捷键打开 Scheduler 之前的前台应用，隐藏 Scheduler 时把焦点还给它。
+    private var hotKeysRegistered = false
+    private var hotKeysAttempted = false
+    private let logHotKey = GlobalHotKey(action: .log)
+    private let mainHotKey = GlobalHotKey(action: .main)
+    private let shellHotKey = GlobalHotKey(action: .shell)
+    private let shell = ShellWindowController()
+    private let interaction = WorkspaceInteraction()
+    private let commands = CommandCenter()
+    private let toast = ToastCenter()
+    private let focus = FocusSession()
+    private var focusPanel: FocusPanelController?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSWindow.allowsAutomaticWindowTabbing = false
+        let testDirectory = ProcessInfo.processInfo.environment["DAYLEAF_DATA_DIR"].map { URL(fileURLWithPath: $0) }
+        let snapshotRun = CommandLine.arguments.contains("--snapshot")
+        store = JournalStore(directory: testDirectory)
+        reminders = ReminderScheduler(store: store)
+        reminders.isEnabled = !snapshotRun
+        focus.store = store
+        if !snapshotRun { startSchedulerServer() }
+        focusPanel = FocusPanelController(session: focus)
+        loginItem = LoginItem()
+        settings = SettingsWindowController(loginItem: loginItem, failedHotKeys: { [weak self] in self?.failedHotKeys })
+        shell.handoffWindow = { [unowned self] in window.isVisible && !window.isMiniaturized ? window : nil }
+        quickCapture = QuickCaptureController(store: store, openMain: { [weak self] in self?.showMainWindow() },
+                                              openShell: { [weak self] in self?.shell.show() })
+        UserDefaults.standard.register(defaults: [Prefs.clickExpands: true, Prefs.globalHotKey: true, Prefs.uiScale: 1.0])
+        buildMenu()
+        window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1280, height: 820),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered, defer: false
+        )
+        window.title = "Scheduler"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        // 去掉红绿灯；关闭 / 最小化仍可用 ⌘W、⌘M，也可以用全局快捷键隐藏。
+        [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].forEach { window.standardWindowButton($0)?.isHidden = true }
+        window.minSize = NSSize(width: 640, height: 560)
+        window.isReleasedWhenClosed = false
+        // 在当前桌面（Space）打开，而不是切到窗口原来所在的桌面。
+        window.collectionBehavior.insert(.moveToActiveSpace)
+        window.delegate = self
+        window.contentView = NSHostingView(rootView: ContentView(store: store, loginItem: loginItem)
+            .environmentObject(reminders).environmentObject(interaction)
+            .environmentObject(commands).environmentObject(toast).environment(\.focusSession, focus))
+        window.center()
+        window.setFrameAutosaveName("DayleafMainWindow")
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        reminders.onComplete = { [weak self] in self?.toast.show("已从通知完成「\($0)」") }
+        focus.onDegraded = { [weak self] in
+            self?.toast.show("没有授权 Scheduler 控制 Safari，专注计时只能检测是否离开 Safari。可在系统设置 → 隐私与安全性 → 自动化 里开启。", duration: 10)
+        }
+        if CommandLine.arguments.contains("--enable-login") { loginItem.setEnabled(true) }
+        if !snapshotRun {
+            ImageIndexer.run(store: store)
+            // 启动稍后清理不再被任何数据或备份引用的图片，不拖慢启动。
+            DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [store] in store?.removeUnusedImages() }
+            quickCapture.installStatusItem()
+            logHotKey.onPress = { [weak self] in self?.quickCapture.toggle(.log) }
+            mainHotKey.onPress = { [weak self] in self?.toggleMainWindow() }
+            shellHotKey.onPress = { [weak self] in self?.shell.toggle() }
+            applyHotKeyPreference()
+            NotificationCenter.default.addObserver(forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.applyHotKeyPreference() }
+            }
+            installKeyboardNavigation()
+            NotificationCenter.default.addObserver(forName: .dayleafHotKeysChanged, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.applyNotesShortcut(); self?.rebindHotKeysIfNeeded() }
+            }
+        }
+        if let index = CommandLine.arguments.firstIndex(of: "--snapshot"), CommandLine.arguments.count > index + 1 {
+            let destination = CommandLine.arguments[index + 1]
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
+                guard let view = window.contentView,
+                      let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(1) }
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                guard let data = bitmap.representation(using: .png, properties: [:]) else { exit(1) }
+                do {
+                    try data.write(to: URL(fileURLWithPath: destination))
+                    print("Rendered \(Int(view.bounds.width)) × \(Int(view.bounds.height)) window to \(destination)")
+                    NSApp.terminate(nil)
+                } catch { exit(1) }
+            }
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showMainWindow()
+        return true
+    }
+
+    /// ⌘W：按窗口代理的规则关闭当前窗口（终端有程序在运行时会先确认）。红绿灯被隐藏后，performClose 可能没有反应，所以直接判断。
+    private func closeKeyWindow() {
+        guard let target = NSApp.keyWindow ?? window else { return }
+        if target.delegate?.windowShouldClose?(target) ?? true { target.close() }
+    }
+
+    private func showMainWindow() {
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.alphaValue = 1
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// 全局快捷键：Scheduler 不在前台就在**当前桌面**淡入并调到最前面（不会把你切到 Scheduler 所在的桌面）；
+    /// 已经在前台就淡出隐藏，焦点回到刚才的应用。
+    private func toggleMainWindow() {
+        // 只有「主窗口（或它的笔记子窗口）正是当前键盘窗口」才算在前台；终端在前台、主窗口在后面时，按键是把主窗口调上来。
+        let key = NSApp.keyWindow
+        let mainIsKey = key === window || key?.parent === window
+        if NSApp.isActive, mainIsKey, window.isVisible, !window.isMiniaturized {
+            hideMainWindowSoftly()
+        } else {
+            showMainWindowSoftly()
+        }
+    }
+
+    private func showMainWindowSoftly() {
+        PreviousApp.remember()
+        NSApp.unhide(nil)
+        moveToMouseScreenIfNeeded()
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        let appearing = !window.isVisible
+        WindowFade.reset(window)
+        if appearing, !Motion.reduced { window.alphaValue = 0 }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        if appearing, !Motion.reduced { fadeWindow(to: 1, duration: 0.18) }
+    }
+
+    /// 只隐藏主窗口本身，不隐藏整个应用：否则之后别的窗口（比如快速记录窗口）一出现，系统会把被隐藏的主窗口一起带回来。
+    private func hideMainWindowSoftly() {
+        NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+        let finish: () -> Void = { [weak self] in
+            guard let self else { return }
+            window.orderOut(nil)
+            WindowFade.reset(window)
+            PreviousApp.restore(handoff: shell.visibleWindow)
+        }
+        if Motion.reduced { finish() } else { fadeWindow(to: 0, duration: 0.14, completion: finish) }
+    }
+
+    private func fadeWindow(to alpha: CGFloat, duration: TimeInterval, completion: (() -> Void)? = nil) {
+        WindowFade.animate(window, to: alpha, duration: duration, completion: completion)
+    }
+
+    /// 窗口不在鼠标所在的屏幕上时，把它放到那块屏幕的中央，这样按下快捷键后窗口就出现在你正在看的地方。
+    private func moveToMouseScreenIfNeeded() {
+        let mouse = NSEvent.mouseLocation
+        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(mouse, $0.frame, false) }),
+              window.screen != screen else { return }
+        let area = screen.visibleFrame
+        let size = window.frame.size
+        window.setFrameOrigin(NSPoint(x: area.midX - size.width / 2, y: area.midY - size.height / 2))
+    }
+
+    /// 启动命令行用的 socket 服务：`sched log / todo / done` 通过它写入。启动失败（比如另一个实例已经在监听）不影响应用使用。
+    private func startSchedulerServer() {
+        let service = SchedulerService(store: store)
+        let server = SchedulerServer(path: SchedulerWire.socketPath(directory: store.directory)) { [service] request in service.handle(request) }
+        do {
+            try server.start()
+            schedulerService = service
+            schedulerServer = server
+        } catch SchedulerServer.StartError.alreadyRunning {
+            NSLog("Scheduler: 命令行 socket 已被另一个实例占用，本实例不启动命令行服务。")
+        } catch {
+            NSLog("Scheduler: 命令行 socket 启动失败：\(error)")
+        }
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+        store.save()
+        return true
+    }
+
+    // MARK: - 全局快捷键
+
+    private var allHotKeys: [(HotKeyAction, GlobalHotKey)] {
+        [(.main, mainHotKey), (.shell, shellHotKey), (.log, logHotKey)]
+    }
+
+    /// 被其他应用占用而注册失败的动作，设置里据此逐条提示。
+    private(set) var failedHotKeys: Set<HotKeyAction> = []
+
+    private func applyHotKeyPreference() {
+        let wanted = UserDefaults.standard.bool(forKey: Prefs.globalHotKey)
+        if wanted, !hotKeysAttempted {
+            hotKeysAttempted = true
+            registerAllHotKeys()
+        } else if !wanted, hotKeysAttempted {
+            allHotKeys.forEach { $0.1.unregister() }
+            hotKeysAttempted = false
+            hotKeysRegistered = false
+            failedHotKeys = []
+        }
+    }
+
+    /// 按设置里最新的绑定重新注册全部快捷键。
+    private func registerAllHotKeys() {
+        failedHotKeys = []
+        for (action, hotKey) in allHotKeys where !hotKey.rebind(HotKeyStore.binding(for: action)) { failedHotKeys.insert(action) }
+        hotKeysRegistered = failedHotKeys.isEmpty
+    }
+
+    private func rebindHotKeysIfNeeded() {
+        guard hotKeysAttempted else { return }
+        registerAllHotKeys()
+    }
+
+    // MARK: - 键盘导航
+
+    private var isEditingText: Bool {
+        (NSApp.keyWindow?.firstResponder as? NSText)?.isEditable == true
+    }
+
+    /// 没有文本框占用键盘时：方向键选择事项或切换日期，空格完成，回车编辑，Delete 删除。
+    private func installKeyboardNavigation() {
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            return MainActor.assumeIsolated { self.handleKey(event) ? nil : event }
+        }
+    }
+
+    private func handleKey(_ event: NSEvent) -> Bool {
+        guard let keyWindow = NSApp.keyWindow, keyWindow === window, window.attachedSheet == nil, !isEditingText,
+              event.modifierFlags.intersection([.command, .control, .option]).isEmpty else { return false }
+        let shift = event.modifierFlags.contains(.shift)
+        switch event.keyCode {
+        case 126 where !shift: commands.send(.selectAdjacent(-1))
+        case 125 where !shift: commands.send(.selectAdjacent(1))
+        case 123 where !shift: commands.send(.shiftDay(-1))
+        case 124 where !shift: commands.send(.shiftDay(1))
+        case 49 where interaction.selectedTaskID != nil: commands.send(.toggleSelected)
+        case 36, 76: guard interaction.selectedTaskID != nil else { return false }; commands.send(.editSelected)
+        case 51, 117: guard interaction.selectedTaskID != nil else { return false }; commands.send(.deleteSelected)
+        case 53: guard interaction.selectedTaskID != nil else { return false }; commands.send(.deselect)
+        default: return false
+        }
+        return true
+    }
+
+    // MARK: - 撤销 / 重做
+
+    @objc private func undoAction(_ sender: Any?) {
+        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isEditable {
+            editor.undoManager?.undo()
+        } else { store.undo() }
+    }
+
+    @objc private func redoAction(_ sender: Any?) {
+        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isEditable {
+            editor.undoManager?.redo()
+        } else { store.redo() }
+    }
+
+    /// 真正退出时才关 socket：退出被取消（有终端在运行、保存失败）时命令行服务要继续可用。
+    func applicationWillTerminate(_ notification: Notification) {
+        schedulerServer?.stop()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+        window.makeFirstResponder(nil)
+        if shell.busyCount > 0 {
+            let alert = NSAlert()
+            alert.messageText = "有 \(shell.busyCount) 个终端正在运行程序"
+            alert.informativeText = "退出 Scheduler 会结束它们（比如正在进行的 agent 对话）。"
+            alert.addButton(withTitle: "取消")
+            alert.addButton(withTitle: "仍然退出")
+            if alert.runModal() == .alertFirstButtonReturn { return .terminateCancel }
+        }
+        shell.terminateAll()
+        focus.stop(reason: "应用退出")
+        guard !store.isReadOnly else { return .terminateNow }
+        store.save()
+        guard store.errorMessage != nil else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText = "还有未保存的修改"
+        alert.informativeText = "请返回 Scheduler 重试保存，或使用「文件」菜单导出备份。直接退出会丢失未保存的修改。"
+        alert.addButton(withTitle: "返回 Scheduler")
+        alert.addButton(withTitle: "仍然退出")
+        return alert.runModal() == .alertFirstButtonReturn ? .terminateCancel : .terminateNow
+    }
+
+    // MARK: - 菜单
+
+    @objc private func runMenuAction(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? MenuAction else { return }
+        if let key = action.toggleKey {
+            let defaults = UserDefaults.standard
+            let current = defaults.object(forKey: key) == nil ? action.toggleDefault : defaults.bool(forKey: key)
+            defaults.set(!current, forKey: key)
+        } else {
+            action.run()
+        }
+    }
+
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        guard let action = item.representedObject as? MenuAction else {
+            if item.action == #selector(undoAction(_:)) {
+                let typing = isEditingText
+                let name = store.undoManager.undoActionName
+                item.title = typing || name.isEmpty ? "撤销" : "撤销\(name)"
+                return typing || store.undoManager.canUndo
+            }
+            if item.action == #selector(redoAction(_:)) {
+                let typing = isEditingText
+                let name = store.undoManager.redoActionName
+                item.title = typing || name.isEmpty ? "重做" : "重做\(name)"
+                return typing || store.undoManager.canRedo
+            }
+            return true
+        }
+        if let key = action.toggleKey {
+            let defaults = UserDefaults.standard
+            let on = defaults.object(forKey: key) == nil ? action.toggleDefault : defaults.bool(forKey: key)
+            item.state = on ? .on : .off
+        }
+        if action.disabledInTerminal, NSApp.keyWindow is TerminalWindow { return false }
+        if action.disabledWhileTyping { return !isEditingText && NSApp.keyWindow === window }
+        return true
+    }
+
+    /// 「笔记」菜单项，快捷键读设置里的绑定（默认 ⌃N），改键后立即更新。
+    private var notesMenuItem = NSMenuItem()
+
+    private func applyNotesShortcut() {
+        let equivalent = HotKeyStore.binding(for: .notes).menuEquivalent
+        notesMenuItem.keyEquivalent = equivalent.key
+        notesMenuItem.keyEquivalentModifierMask = equivalent.mask
+    }
+
+    private func menuItem(_ title: String, key: String = "", modifiers: NSEvent.ModifierFlags = [.command],
+                          typingSensitive: Bool = false, yieldsToTerminal: Bool = false, toggle: (key: String, defaultOn: Bool)? = nil,
+                          _ run: @escaping () -> Void = {}) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: #selector(runMenuAction(_:)), keyEquivalent: key)
+        if !key.isEmpty { item.keyEquivalentModifierMask = modifiers }
+        let action = MenuAction(run)
+        action.disabledWhileTyping = typingSensitive
+        action.disabledInTerminal = yieldsToTerminal
+        if let toggle { action.toggleKey = toggle.key; action.toggleDefault = toggle.defaultOn }
+        item.representedObject = action
+        item.target = self
+        return item
+    }
+
+    private func submenu(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
+        let menu = NSMenu(title: title)
+        items.forEach { menu.addItem($0) }
+        let holder = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        holder.submenu = menu
+        return holder
+    }
+
+    private func buildMenu() {
+        let mainMenu = NSMenu()
+        let send = { [commands] (command: AppCommand) in { if !(NSApp.keyWindow is TerminalWindow) { commands.send(command) } } }
+        let arrow = { (scalar: Int) in String(UnicodeScalar(scalar)!) }
+        let left = arrow(NSLeftArrowFunctionKey), right = arrow(NSRightArrowFunctionKey)
+
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "关于 Scheduler", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(menuItem("设置…", key: ",") { [weak self] in self?.settings.show() })
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "隐藏 Scheduler", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(withTitle: "退出 Scheduler", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let appItem = NSMenuItem()
+        appItem.submenu = appMenu
+        mainMenu.addItem(appItem)
+
+        let file = submenu("文件", [
+            menuItem("新建待办", send(.newTodo)),
+            menuItem("写日志", key: "l", send(.newLog)),
+            menuItem("快速添加待办…") { [weak self] in self?.quickCapture.toggle(.todo) },
+            menuItem("快速写日志…") { [weak self] in self?.quickCapture.toggle(.log) },
+            menuItem("插入链接…", send(.insertLink)),
+            .separator(),
+            menuItem("导出为文件夹…", send(.export)),
+            menuItem("备份与恢复…", send(.backups)),
+            menuItem("打开数据文件夹") { [weak self] in if let store = self?.store { NSWorkspace.shared.open(store.directory) } },
+        ])
+        mainMenu.addItem(file)
+
+        let editMenu = NSMenu(title: "编辑")
+        let undo = editMenu.addItem(withTitle: "撤销", action: #selector(undoAction(_:)), keyEquivalent: "z")
+        undo.target = self
+        let redo = NSMenuItem(title: "重做", action: #selector(redoAction(_:)), keyEquivalent: "z")
+        redo.target = self
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redo)
+        editMenu.addItem(.separator())
+        for (title, selector, key) in [("剪切", "cut:", "x"), ("复制", "copy:", "c"), ("粘贴", "paste:", "v"), ("全选", "selectAll:", "a")] {
+            editMenu.addItem(withTitle: title, action: Selector(selector), keyEquivalent: key)
+        }
+        editMenu.addItem(.separator())
+        editMenu.addItem(menuItem("搜索任务、日志与总结…", key: "f", send(.search)))
+        let editItem = NSMenuItem(title: "编辑", action: nil, keyEquivalent: "")
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+
+        let terminal = submenu("终端", [
+            menuItem("新建终端窗口", key: "n") { [weak self] in self?.shell.newWindow() },
+            menuItem("新建标签页", key: "t") { [weak self] in self?.shell.newTab() },
+            menuItem("关闭标签页 / 窗口", key: "w") { [weak self] in self?.closeKeyWindow() },
+            .separator(),
+            menuItem("向右分栏", key: "d") { [weak self] in if NSApp.keyWindow is TerminalWindow { self?.shell.splitPane(sideBySide: true) } },
+            menuItem("向下分栏", key: "d", modifiers: [.command, .shift]) { [weak self] in if NSApp.keyWindow is TerminalWindow { self?.shell.splitPane(sideBySide: false) } },
+            menuItem("关闭窗格", key: "w", modifiers: [.command, .option]) { [weak self] in if NSApp.keyWindow is TerminalWindow { self?.shell.closePane() } },
+            .separator(),
+            menuItem("上一个窗格", key: "[") { [weak self] in self?.shell.selectPane(-1) },
+            menuItem("下一个窗格", key: "]") { [weak self] in self?.shell.selectPane(1) },
+            menuItem("上一个标签页", key: "[", modifiers: [.command, .shift]) { [weak self] in self?.shell.selectAdjacentTab(-1) },
+            menuItem("下一个标签页", key: "]", modifiers: [.command, .shift]) { [weak self] in self?.shell.selectAdjacentTab(1) },
+        ] + (1...9).map { number in
+            menuItem("切换到第 \(number) 个标签页", key: String(number)) { [weak self] in self?.shell.selectTab(at: number - 1) }
+        } + [
+            .separator(),
+            menuItem("清屏", key: "k") { [weak self] in self?.shell.clearScreen() },
+            .separator(),
+            menuItem("显示 / 隐藏全部终端") { [weak self] in self?.shell.toggle() },
+        ])
+        mainMenu.addItem(terminal)
+
+        let task = submenu("事项", [
+            menuItem("完成 / 取消完成（空格）", typingSensitive: true, send(.toggleSelected)),
+            menuItem("编辑所选事项（回车）", typingSensitive: true, send(.editSelected)),
+            menuItem("删除所选事项（Delete）", typingSensitive: true, send(.deleteSelected)),
+            .separator(),
+            menuItem("选择上一条（↑）", typingSensitive: true, send(.selectAdjacent(-1))),
+            menuItem("选择下一条（↓）", typingSensitive: true, send(.selectAdjacent(1))),
+            .separator(),
+            menuItem("把逾期事项的截止日期改到今天", key: "m", modifiers: [.command, .shift], send(.rollover)),
+        ])
+        mainMenu.addItem(task)
+
+        notesMenuItem = menuItem("笔记（开 / 关）", yieldsToTerminal: true, send(.toggleNotes))
+        applyNotesShortcut()
+        let view = submenu("视图", [
+            menuItem("回到今天", send(.today)),
+            menuItem("前一天", key: left, modifiers: [.command, .option], typingSensitive: true, send(.shiftDay(-1))),
+            menuItem("后一天", key: right, modifiers: [.command, .option], typingSensitive: true, send(.shiftDay(1))),
+            menuItem("上个月", send(.shiftMonth(-1))),
+            menuItem("下个月", send(.shiftMonth(1))),
+            .separator(),
+            notesMenuItem,
+            .separator(),
+            menuItem("未完成事项…", send(.agenda(.unfinished))),
+            menuItem("即将截止…", send(.agenda(.upcoming))),
+            menuItem("已逾期…", send(.agenda(.overdue))),
+            .separator(),
+            menuItem("显示 / 隐藏待办清单", key: "\\", send(.toggleTasks)),
+            menuItem("显示 / 隐藏终端", key: "j", send(.toggleTerminal)),
+            menuItem("隐藏已完成", key: "h", modifiers: [.command, .shift], toggle: (Prefs.hideCompleted, false)),
+            menuItem("单击日期时展开待办清单", toggle: (Prefs.clickExpands, true)),
+        ])
+        mainMenu.addItem(view)
+
+        let windowMenu = NSMenu(title: "窗口")
+        windowMenu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "缩放", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenu.addItem(menuItem("显示 / 隐藏 Scheduler") { [weak self] in self?.toggleMainWindow() })
+        let windowItem = NSMenuItem(title: "窗口", action: nil, keyEquivalent: "")
+        windowItem.submenu = windowMenu
+        mainMenu.addItem(windowItem)
+        NSApp.mainMenu = mainMenu
+        NSApp.windowsMenu = windowMenu
+    }
+}

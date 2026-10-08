@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>Scheduler</string>
+    <key>CFBundleDisplayName</key><string>Scheduler</string>
+    <key>CFBundleIdentifier</key><string>local.dayleaf.app</string>
+    <key>CFBundleExecutable</key><string>Scheduler</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>2.2.5</string>
+    <key>CFBundleVersion</key><string>11</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSPrincipalClass</key><string>NSApplication</string>
+    <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
+    <key>NSAppleEventsUsageDescription</key><string>专注计时需要读取 Safari 当前页面的地址，以判断你是否离开了任务里的链接页面。只读取地址，不会修改或上传。</string>
+    <key>UTExportedTypeDeclarations</key>
+    <array><dict>
+        <key>UTTypeIdentifier</key><string>local.dayleaf.task</string>
+        <key>UTTypeDescription</key><string>Scheduler Task</string>
+        <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+    </dict></array>
+</dict>
+</plist>

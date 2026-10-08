@@ -1,0 +1,99 @@
+import AppKit
+import SwiftUI
+import DayleafCore
+import UniformTypeIdentifiers
+
+struct DeadlineDayCell: View {
+    @ObservedObject var store: JournalStore
+    let date: Date
+    let selectedDate: Date
+    let displayedMonth: Date
+    let height: CGFloat
+    let items: [ScheduledTask]
+    let select: () -> Void
+    let open: () -> Void
+    let editTask: (ScheduledTask) -> Void
+    @State private var targeted = false
+    @State private var checkboxFrames: [CGRect] = []
+    @State private var after = false
+    @ObservedObject private var dragSession = TaskDragSession.shared
+
+    /// 日历只在任务的截止日期那天显示它。
+    static func previewItems(dueItems: [ScheduledTask], hideCompleted: Bool) -> [ScheduledTask] {
+        dueItems.sorted(by: ScheduledTask.listOrder)
+            .filter { !hideCompleted || !$0.task.completed }
+    }
+    private var dueToday: [ScheduledTask] { store.calendarDeadlines[JournalDates.key(date)] ?? [] }
+    private static let space = "dayCell"
+    private var accessibilityDescription: String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "zh_CN")
+        formatter.dateFormat = "M月d日 EEEE"
+        let due = dueToday
+        let summary = due.isEmpty ? "没有截止事项" : "\(due.count) 项截止，已完成 \(due.filter(\.task.completed).count) 项"
+        return "\(formatter.string(from: date))，\(summary)\(today ? "，今天" : "")"
+    }
+    private var selected: Bool { JournalDates.calendar.isDate(date, inSameDayAs: selectedDate) }
+    private var today: Bool { JournalDates.calendar.isDateInToday(date) }
+    private var inMonth: Bool { JournalDates.calendar.isDate(date, equalTo: displayedMonth, toGranularity: .month) }
+
+    var body: some View {
+        return VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 3) {
+                Text("\(JournalDates.calendar.component(.day, from: date))")
+                    .font(.system(size: UIScale.pt(12), weight: selected || today ? .bold : .medium, design: .rounded))
+                    .foregroundStyle(today ? Palette.accent : (inMonth ? Palette.ink : Palette.muted))
+                Spacer(minLength: 0)
+                if !dueToday.isEmpty {
+                    Text("\(dueToday.filter(\.task.completed).count)/\(dueToday.count)")
+                        .font(.system(size: UIScale.pt(10), design: .monospaced)).foregroundStyle(Palette.muted)
+                        .help("已完成 / 当天截止的事项")
+                }
+            }
+            ForEach(items) { item in
+                HStack(alignment: .top, spacing: 0) {
+                    Button { store.toggleTodo(item.id, on: item.date) } label: {
+                        Image(systemName: item.task.completed ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(item.task.completed ? Palette.success : Palette.deadline)
+                            .frame(width: 16, alignment: .trailing)
+                    }.buttonStyle(HitAreaButtonStyle(compact: true)).disabled(store.isReadOnly)
+                        .background(GeometryReader { proxy in
+                            Color.clear.preference(key: CheckboxFramesKey.self, value: [item.id: proxy.frame(in: .named(Self.space))])
+                        })
+                        .accessibilityLabel((item.task.completed ? "标记未完成：" : "标记完成：") + item.task.title)
+                    TaskLinkText(source: item.task.title, completed: item.task.completed, color: Palette.ink, fontSize: 11,
+                                 edit: { editTask(item) },
+                                 open: SafariLinks.open,
+                                 maxLines: 1, displayName: item.task.calendarName, dragTaskID: item.id)
+                        .disabled(store.isReadOnly)
+                }.font(.system(size: UIScale.pt(11))).frame(height: UIScale.pt(22))
+                    .background(Palette.background, in: RoundedRectangle(cornerRadius: 4))
+                    .contentShape(RoundedRectangle(cornerRadius: 4))
+                    .modifier(TaskDragSource(task: item.task, enabled: !store.isReadOnly, edgeDragging: false))
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(6).frame(maxWidth: .infinity, alignment: .topLeading).frame(minHeight: height, alignment: .topLeading)
+        .background(selected || today || targeted ? Palette.soft : (inMonth ? Palette.card : Palette.background), in: RoundedRectangle(cornerRadius: 5))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(selected || targeted ? Palette.accent : Palette.line.opacity(0.55), lineWidth: selected || targeted ? 1.5 : 0.5))
+        .contentShape(Rectangle())
+        .coordinateSpace(name: Self.space)
+        .onPreferenceChange(CheckboxFramesKey.self) { checkboxFrames = Array($0.values) }
+        .background(CalendarCellClicks(select: select, expand: open, excluded: checkboxFrames))
+        .help("单击选择 · 双击添加事项")
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(accessibilityDescription)
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
+        .accessibilityAction(named: "选择这一天", select)
+        .accessibilityAction(named: "添加事项", open)
+        .onDrop(of: [TaskDragPayload.type], delegate: TaskDropTarget(store: store, destination: date, targeted: $targeted, after: $after))
+        .onChange(of: dragSession.activeID) { if $0 == nil { targeted = false } }
+    }
+}
+
+private struct CheckboxFramesKey: PreferenceKey {
+    static var defaultValue: [UUID: CGRect] = [:]
+    static func reduce(value: inout [UUID: CGRect], nextValue: () -> [UUID: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
+}

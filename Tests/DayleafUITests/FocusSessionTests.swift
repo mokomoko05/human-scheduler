@@ -1,0 +1,247 @@
+import AppKit
+import XCTest
+import DayleafCore
+@testable import Dayleaf
+
+@MainActor
+final class FocusSessionTests: XCTestCase {
+    private func makeSession() throws -> (FocusSession, JournalStore, ScheduledTask) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = JournalStore(directory: directory)
+        store.addTodo("看回放 [课程](https://v.example.edu/play-center?id=1#/room)", on: Date())
+        let task = try XCTUnwrap(store.locate(number: 1))
+        let session = FocusSession()
+        session.store = store
+        session.openLink = { _ in }
+        session.activateExistingTab = { _ in false }
+        return (session, store, task)
+    }
+
+    private func result(onTarget: Bool, reason: String = "离开了目标页面", page: String? = nil) -> FocusProbe.Result {
+        FocusProbe.Result(onTarget: onTarget, awayReason: reason, frontBundle: "com.apple.Safari", pageURL: page.flatMap(URL.init(string:)), automationDenied: false)
+    }
+
+    func testOnlyTasksWithAWebOrFileLinkOfferFocus() {
+        XCTAssertEqual(FocusSession.link(in: "看 [课程](https://a.edu/x)")?.host, "a.edu")
+        XCTAssertEqual(FocusSession.link(in: "读 https://arxiv.org/pdf/2609.27396")?.host, "arxiv.org")
+        XCTAssertEqual(FocusSession.link(in: "读 [pdf](file:///Users/me/a.pdf)")?.path, "/Users/me/a.pdf")
+        XCTAssertNil(FocusSession.link(in: "买牛奶"))
+        XCTAssertNil(FocusSession.link(in: "[邮件](mailto:a@b.c)"))
+    }
+
+    func testPageMatchingIgnoresQueryFragmentWwwAndTrailingSlash() throws {
+        let base = FocusSession.baseline(for: try XCTUnwrap(URL(string: "https://www.v.example.edu/play-center/?id=1#/room")))
+        XCTAssertTrue(FocusSession.matches(try XCTUnwrap(URL(string: "https://v.example.edu/play-center?id=2#/other")), base))
+        XCTAssertFalse(FocusSession.matches(try XCTUnwrap(URL(string: "https://v.example.edu/other")), base))
+        XCTAssertFalse(FocusSession.matches(try XCTUnwrap(URL(string: "https://news.example.com/play-center")), base))
+    }
+
+    func testFindsTheAlreadyOpenTabAcrossWindowsIgnoringQueryAndFragment() throws {
+        let target = try XCTUnwrap(URL(string: "https://v.example.edu/play-center?id=1#/room"))
+        let output = "11\t1\thttps://news.example.com/\n11\t2\thttps://www.google.com/search?q=x\n42\t1\thttps://v.example.edu/\n42\t3\thttps://v.example.edu/play-center/?id=9#/other\n"
+        let found = try XCTUnwrap(FocusProbe.bestTab(in: output, for: target))
+        XCTAssertEqual(found.window, 42)
+        XCTAssertEqual(found.tab, 3)
+        XCTAssertNil(FocusProbe.bestTab(in: "11\t1\thttps://news.example.com/\n", for: target))
+        XCTAssertNil(FocusProbe.bestTab(in: "", for: target))
+        let pdf = try XCTUnwrap(URL(string: "file:///Users/me/Reading/paper.pdf"))
+        XCTAssertEqual(FocusProbe.bestTab(in: "7\t2\tfile:///Users/me/Reading/paper.pdf\n", for: pdf)?.tab, 2)
+    }
+
+    func testAlreadyOpenPageIsActivatedInsteadOfReloaded() async throws {
+        let (session, _, task) = try makeSession()
+        var opened = 0
+        var activated = 0
+        session.openLink = { _ in opened += 1 }
+        session.activateExistingTab = { _ in activated += 1; return true }
+        session.start(task: task, url: try XCTUnwrap(FocusSession.link(in: task.task.title)))
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(activated, 1)
+        XCTAssertEqual(opened, 0, "页面已经开着时不再重新打开，避免回到页面开头")
+        session.stop(reason: "手动结束")
+        session.activateExistingTab = { _ in false }
+        session.start(task: task, url: try XCTUnwrap(FocusSession.link(in: task.task.title)))
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(opened, 1, "没开着才打开链接")
+        session.stop(reason: "手动结束")
+    }
+
+    func testOrdinaryLinkClicksAlsoReuseAnOpenTab() async throws {
+        let (activate, launch) = (SafariLinks.activateExistingTab, SafariLinks.launch)
+        defer { SafariLinks.activateExistingTab = activate; SafariLinks.launch = launch }
+        var launched: [URL] = []
+        SafariLinks.launch = { launched.append($0) }
+        SafariLinks.activateExistingTab = { _ in true }
+        SafariLinks.open(try XCTUnwrap(URL(string: "https://arxiv.org/pdf/2609.27396")))
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertTrue(launched.isEmpty, "已开着的页面直接切换，不再重新打开")
+        SafariLinks.activateExistingTab = { _ in false }
+        SafariLinks.open(try XCTUnwrap(URL(string: "https://arxiv.org/pdf/2609.27396")))
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(launched.map(\.host), ["arxiv.org"], "没开着才打开")
+    }
+
+    func testStartLogsStartTimeAndStopLogsDurationAndReason() async throws {
+        let (session, store, task) = try makeSession()
+        var opened: [URL] = []
+        session.openLink = { opened.append($0) }
+        // 固定在中午：深夜运行时 25 分钟后会跨过午夜，结束记录就落到第二天了。
+        let start = JournalDates.calendar.date(bySettingHour: 12, minute: 0, second: 0, of: Date())!
+        session.start(task: task, url: try XCTUnwrap(FocusSession.link(in: task.task.title)), now: start)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(opened.first?.host, "v.example.edu")
+        XCTAssertEqual(session.active?.number, 1)
+        session.stop(reason: "手动结束", now: start.addingTimeInterval(1503))
+        XCTAssertNil(session.active)
+        let logs = try XCTUnwrap(store.days[JournalDates.key(start)]?.logs)
+        XCTAssertEqual(logs.map(\.text), ["▶ 开始专注", "■ 结束专注 · 用时 25 分 3 秒 · 累计 25 分 3 秒 · 手动结束"])
+        XCTAssertEqual(store.locate(task.id)?.task.focusSeconds ?? 0, 1503, accuracy: 0.01, "用时累加到任务上")
+        XCTAssertEqual(logs.map(\.createdAt), [start, start.addingTimeInterval(1503)])
+        XCTAssertTrue(logs.allSatisfy { $0.focus && $0.taskID == task.id })
+        XCTAssertTrue(store.notes(for: task.id).isEmpty, "笔记视图屏蔽专注记录")
+    }
+
+    func testLeavingNeedsConsecutivePollsAndGraceAdoptsRedirectedPage() throws {
+        let (session, store, task) = try makeSession()
+        session.start(task: task, url: try XCTUnwrap(FocusSession.link(in: task.task.title)))
+        // 宽限期内即使不在目标页面也不结束，并把实际打开的页面（重定向后）当作目标。
+        session.apply(result(onTarget: false, page: "https://sso.example.edu/landing"), inGrace: true)
+        XCTAssertNotNil(session.active)
+        session.apply(result(onTarget: true), inGrace: false)
+        session.apply(result(onTarget: false), inGrace: false)
+        XCTAssertNotNil(session.active, "只离开一次不算，避免通知或 Spotlight 一闪而过")
+        session.apply(result(onTarget: true), inGrace: false)
+        session.apply(result(onTarget: false), inGrace: false)
+        XCTAssertNotNil(session.active, "中间回到页面会重新计数")
+        session.apply(result(onTarget: false, reason: "切换到了微信"), inGrace: false)
+        XCTAssertNil(session.active)
+        let last = try XCTUnwrap(store.days.values.flatMap(\.logs).max { $0.createdAt < $1.createdAt })
+        XCTAssertTrue(last.text.hasPrefix("■ 结束专注"))
+        XCTAssertTrue(last.text.hasSuffix("切换到了微信"))
+    }
+
+    func testWorkingInDayleafItselfNeverCountsAsLeavingAndKeepsAccumulating() throws {
+        let (session, store, task) = try makeSession()
+        session.start(task: task, url: try XCTUnwrap(FocusSession.link(in: task.task.title)))
+        var own = result(onTarget: true)
+        own.ownApp = true
+        for _ in 0..<30 { session.apply(own, inGrace: false) }
+        XCTAssertNotNil(session.active, "在 Scheduler 里记笔记不会停止计时")
+        // Scheduler 前台期间的计数清零：回到浏览器后只离开一次不会立刻结束。
+        session.apply(result(onTarget: false), inGrace: false)
+        session.apply(own, inGrace: false)
+        session.apply(result(onTarget: false), inGrace: false)
+        XCTAssertNotNil(session.active)
+        session.apply(result(onTarget: false), inGrace: false)
+        XCTAssertNil(session.active, "回到浏览器后不在目标页面，照常判定离开")
+        _ = store
+    }
+
+    func testDegradedDetectionIsReportedOncePerSession() throws {
+        let (session, _, task) = try makeSession()
+        var warnings = 0
+        session.onDegraded = { warnings += 1 }
+        session.start(task: task, url: try XCTUnwrap(FocusSession.link(in: task.task.title)))
+        var denied = result(onTarget: true)
+        denied.automationDenied = true
+        for _ in 0..<5 { session.apply(denied, inGrace: false) }
+        XCTAssertEqual(warnings, 1)
+    }
+
+    func testStartingAnotherTaskEndsTheFirstOne() throws {
+        let (session, store, first) = try makeSession()
+        store.addTodo("另一个 [页面](https://b.example.com/x)", on: Date())
+        let second = try XCTUnwrap(store.locate(number: 2))
+        session.start(task: first, url: try XCTUnwrap(FocusSession.link(in: first.task.title)))
+        session.start(task: second, url: try XCTUnwrap(FocusSession.link(in: second.task.title)))
+        XCTAssertEqual(session.active?.taskID, second.id)
+        let texts = store.days.values.flatMap(\.logs).map(\.text)
+        XCTAssertTrue(texts.contains { $0.contains("切换到了另一个任务") })
+    }
+
+    func testSessionsAccumulateOnTheTaskAndShowRunningTotal() throws {
+        let (session, store, task) = try makeSession()
+        let url = try XCTUnwrap(FocusSession.link(in: task.task.title))
+        let t0 = Date()
+        session.start(task: task, url: url, now: t0)
+        session.stop(reason: "手动结束", now: t0.addingTimeInterval(600))
+        session.start(task: task, url: url, now: t0.addingTimeInterval(1000))
+        session.stop(reason: "离开了目标页面", now: t0.addingTimeInterval(1900))
+        XCTAssertEqual(store.locate(task.id)?.task.focusSeconds ?? 0, 1500, accuracy: 0.01)
+        let ends = store.days.values.flatMap(\.logs).filter { $0.text.hasPrefix("■") }.sorted { $0.createdAt < $1.createdAt }
+        XCTAssertTrue(ends[1].text.contains("用时 15 分 0 秒 · 累计 25 分 0 秒"))
+        XCTAssertEqual(FocusSession.brief(5000), "1 小时 23 分")
+        XCTAssertEqual(FocusSession.brief(1500), "25 分钟")
+        XCTAssertEqual(FocusSession.brief(40), "40 秒")
+    }
+
+    func testQuickLogsDuringFocusLinkToTheFocusedTaskAndStopWhenItEnds() throws {
+        let (session, store, task) = try makeSession()
+        let day = Date()
+        store.addTodo("另一件事", on: day)
+        let other = try XCTUnwrap(store.locate(number: 2))
+
+        _ = try store.quickLog("开始前", on: day)
+        session.start(task: task, url: try XCTUnwrap(URL(string: "https://v.example.edu/play-center")))
+        XCTAssertEqual(store.focusTaskID, task.id)
+
+        _ = try store.quickLog("第二页的公式很关键", on: day)
+        _ = try store.quickLog("/done 看完一半", on: day)
+        _ = try store.quickLog("手动指定", taskID: other.id, on: day)
+
+        let focusedLogs = store.entry(for: day).logs.filter { !$0.focus }
+        XCTAssertNil(focusedLogs.first { $0.text == "开始前" }?.taskID)
+        XCTAssertEqual(focusedLogs.first { $0.text == "第二页的公式很关键" }?.taskID, task.id)
+        XCTAssertEqual(focusedLogs.first { $0.text == "第二页的公式很关键" }?.taskNumber, 1)
+        XCTAssertEqual(focusedLogs.first { $0.text == "看完一半" }?.taskID, task.id)
+        XCTAssertEqual(focusedLogs.first { $0.text == "手动指定" }?.taskID, other.id, "明确指定的任务优先于专注任务")
+        XCTAssertFalse(try XCTUnwrap(store.locate(task.id)).task.completed, "快速日志里的 /done 不会替用户完成任务")
+        XCTAssertEqual(store.notes(for: task.id).map(\.log.text), ["第二页的公式很关键", "看完一半"], "笔记视图里能看到，但看不到专注计时记录")
+
+        session.stop(reason: "手动结束")
+        XCTAssertNil(store.focusTaskID)
+        _ = try store.quickLog("结束后", on: day)
+        XCTAssertNil(store.entry(for: day).logs.last?.taskID)
+    }
+
+    func testMainWindowLogInputAlsoLinksToTheFocusedTaskButExplicitChoiceWins() throws {
+        let (session, store, task) = try makeSession()
+        let day = Date()
+        store.addTodo("另一件事", on: day)
+        let other = try XCTUnwrap(store.locate(number: 2))
+        session.start(task: task, url: try XCTUnwrap(URL(string: "https://v.example.edu/play-center")))
+
+        store.setLogDraft("读到第三节", on: day)
+        try store.commitLog(on: day)
+        store.setLogDraft("#2 顺手记一下", on: day)
+        try store.commitLog(on: day)
+        store.setLogTask(other.id, on: day)
+        store.setLogDraft("选了任务的", on: day)
+        try store.commitLog(on: day)
+        store.setLogDraft("/done", on: day)
+        XCTAssertThrowsError(try store.commitLog(on: day), "专注兜底的关联不借用标题，空的 /done 仍然报空")
+
+        let logs = store.entry(for: day).logs.filter { !$0.focus }
+        XCTAssertEqual(logs.map(\.taskID), [task.id, other.id, other.id])
+        XCTAssertEqual(logs.first?.text, "读到第三节")
+        XCTAssertFalse(try XCTUnwrap(store.locate(task.id)).task.completed)
+    }
+
+    func testDeletingTheFocusedTaskDegradesToUnlinkedLogs() throws {
+        let (session, store, task) = try makeSession()
+        let day = Date()
+        session.start(task: task, url: try XCTUnwrap(URL(string: "https://v.example.edu/play-center")))
+        store.deleteTodo(task.id, on: task.date)
+        XCTAssertNil(store.focusTask)
+        _ = try store.quickLog("任务没了", on: day)
+        XCTAssertNil(store.entry(for: day).logs.last { !$0.focus }?.taskID)
+    }
+
+    func testDurationFormatting() {
+        XCTAssertEqual(FocusSession.duration(59), "59 秒")
+        XCTAssertEqual(FocusSession.duration(3725), "1 小时 2 分 5 秒")
+        XCTAssertEqual(FocusSession.clock(65), "01:05")
+        XCTAssertEqual(FocusSession.clock(3725), "1:02:05")
+    }
+}

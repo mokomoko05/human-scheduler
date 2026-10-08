@@ -1,0 +1,1120 @@
+import Foundation
+import Combine
+
+public struct Todo: Codable, Identifiable, Equatable {
+    public var id: UUID
+    public var title: String
+    public var calendarName = ""
+    public var completed: Bool
+    /// 截止日期一改，手动排的位置就作废，按新的截止时间重新排。
+    public var dueDate: Date? {
+        didSet { if dueDate != oldValue { listPosition = nil } }
+    }
+    public var dueHasTime = false
+    public var reminderMinutes: Int?
+    public var repeatRule: RepeatRule = .none
+    public var repeatMonthDay: Int?
+    public var nextOccurrenceID: UUID?
+    /// 永久编号：创建时分配，改截止日期、改顺序都不变，日志用它引用任务。
+    public var number: Int?
+    /// 在这个任务上累计的专注时长（秒），每次专注结束时累加。
+    public var focusSeconds: TimeInterval = 0
+    /// 在左侧清单里手动拖出来的位置；没有就按截止时间排。
+    public var listPosition: Double?
+    /// 标签（不含 `#`）：把零散的小待办归到同一个大主题下，笔记和搜索都能按标签汇总。
+    public var tags: [String] = []
+
+    /// 没有截止日期的任务排在最后。
+    public static let undatedSortKey = 4_102_444_800.0
+
+    /// 清单的排序键：手动位置优先，否则是截止时间。
+    public var sortKey: Double { listPosition ?? dueDate?.timeIntervalSince1970 ?? Self.undatedSortKey }
+
+    public var effectiveDeadline: Date? {
+        guard let dueDate else { return nil }
+        return dueHasTime ? dueDate : JournalDates.calendar.date(byAdding: .day, value: 1, to: JournalDates.calendar.startOfDay(for: dueDate))
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, title, calendarName, completed, dueDate, dueHasTime, reminderMinutes, repeatRule, repeatMonthDay, nextOccurrenceID, number, focusSeconds, listPosition, tags
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        title = try values.decode(String.self, forKey: .title)
+        calendarName = try values.decodeIfPresent(String.self, forKey: .calendarName) ?? ""
+        completed = try values.decode(Bool.self, forKey: .completed)
+        dueDate = try values.decodeIfPresent(Date.self, forKey: .dueDate)
+        dueHasTime = try values.decodeIfPresent(Bool.self, forKey: .dueHasTime) ?? false
+        reminderMinutes = try values.decodeIfPresent(Int.self, forKey: .reminderMinutes)
+        repeatRule = try values.decodeIfPresent(RepeatRule.self, forKey: .repeatRule) ?? .none
+        repeatMonthDay = try values.decodeIfPresent(Int.self, forKey: .repeatMonthDay)
+        nextOccurrenceID = try values.decodeIfPresent(UUID.self, forKey: .nextOccurrenceID)
+        number = try values.decodeIfPresent(Int.self, forKey: .number)
+        focusSeconds = try values.decodeIfPresent(TimeInterval.self, forKey: .focusSeconds) ?? 0
+        listPosition = try values.decodeIfPresent(Double.self, forKey: .listPosition)
+        tags = try values.decodeIfPresent([String].self, forKey: .tags) ?? []
+    }
+
+    public init(id: UUID = UUID(), title: String, completed: Bool = false) {
+        self.id = id
+        self.title = title
+        self.completed = completed
+    }
+}
+
+public struct DayEntry: Codable, Equatable {
+    public var todos: [Todo] = []
+    public var summary = ""
+    public var logs: [DailyLogEntry] = []
+    public var logDraft = ""
+    public var logTaskID: UUID?
+    /// 已粘贴、尚未随日志提交的图片。
+    public var logDraftImages: [String] = []
+    public var deadlines: [Todo] { todos }
+    public var deadlineDraft = ""
+    public var hasContent: Bool { !todos.isEmpty || !summary.isEmpty || !deadlineDraft.isEmpty || !logs.isEmpty || !logDraft.isEmpty || logTaskID != nil || !logDraftImages.isEmpty }
+    public var completedCount: Int { todos.filter(\.completed).count }
+
+    public init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case todos, summary, deadline, deadlines, deadlineDraft, logs, logDraft, logTaskID, logDraftImages
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        todos = try values.decode([Todo].self, forKey: .todos)
+        summary = try values.decode(String.self, forKey: .summary)
+        logs = try values.decodeIfPresent([DailyLogEntry].self, forKey: .logs) ?? []
+        logDraft = try values.decodeIfPresent(String.self, forKey: .logDraft) ?? ""
+        logTaskID = try values.decodeIfPresent(UUID.self, forKey: .logTaskID)
+        logDraftImages = try values.decodeIfPresent([String].self, forKey: .logDraftImages) ?? []
+        let legacyItems: [Todo]
+        if let items = try values.decodeIfPresent([Todo].self, forKey: .deadlines) {
+            legacyItems = items
+        } else {
+            let legacyText = try values.decodeIfPresent(String.self, forKey: .deadline) ?? ""
+            legacyItems = Self.deadlineItems(from: legacyText)
+        }
+        var identifiers = Set(todos.map(\.id))
+        todos.append(contentsOf: legacyItems.filter { identifiers.insert($0.id).inserted })
+        todos.removeAll { $0.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        deadlineDraft = try values.decodeIfPresent(String.self, forKey: .deadlineDraft) ?? ""
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(todos, forKey: .todos)
+        try values.encode(summary, forKey: .summary)
+        try values.encode(logs, forKey: .logs)
+        try values.encode(logDraft, forKey: .logDraft)
+        try values.encodeIfPresent(logTaskID, forKey: .logTaskID)
+        if !logDraftImages.isEmpty { try values.encode(logDraftImages, forKey: .logDraftImages) }
+        try values.encode(deadlineDraft, forKey: .deadlineDraft)
+    }
+
+    static func deadlineItems(from text: String) -> [Todo] {
+        text.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .map { Todo(title: $0) }
+    }
+}
+
+public enum JournalDates {
+    public static var calendar: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.firstWeekday = 2
+        calendar.timeZone = .current
+        return calendar
+    }
+
+    public static func key(_ date: Date) -> String {
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        return String(format: "%04d-%02d-%02d", components.year!, components.month!, components.day!)
+    }
+
+    public static func monthStart(_ date: Date) -> Date {
+        calendar.dateInterval(of: .month, for: date)!.start
+    }
+
+    public static func date(for key: String) -> Date? {
+        let parts = key.split(separator: "-")
+        guard parts.count == 3, key.count == 10,
+              let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2]),
+              let date = calendar.date(from: DateComponents(year: year, month: month, day: day)),
+              self.key(date) == key else { return nil }
+        return date
+    }
+
+    /// `weekStart` 使用系统约定：1 = 周日，2 = 周一。
+    public static func monthGrid(_ date: Date, weekStart: Int = 2) -> [Date] {
+        let first = monthStart(date)
+        let offset = (calendar.component(.weekday, from: first) - weekStart + 7) % 7
+        let start = calendar.date(byAdding: .day, value: -offset, to: first)!
+        let dayCount = calendar.range(of: .day, in: .month, for: first)!.count
+        let cellCount = ((offset + dayCount + 6) / 7) * 7
+        return (0..<cellCount).map { calendar.date(byAdding: .day, value: $0, to: start)! }
+    }
+}
+
+/// 每次可撤销的修改都会产生一个事件，界面据此显示带「撤销」的提示。
+public struct ActionEvent: Equatable {
+    public let id: Int
+    public let name: String
+}
+
+private struct JournalDocument: Codable {
+    /// 6：任务独立于日期，日期即截止日期（DDL），任务有永久编号。
+    var version = 6
+    var days: [String: DayEntry] = [:]
+    var nextTaskNumber: Int?
+}
+
+@MainActor
+public final class JournalStore: ObservableObject {
+    @Published public private(set) var days: [String: DayEntry] = [:]
+    @Published public private(set) var errorMessage: String?
+    @Published public private(set) var lastSaved: Date?
+    @Published public private(set) var isReadOnly = false
+    @Published public private(set) var canUndoDelete = false
+    @Published public private(set) var lastAction: ActionEvent?
+    /// 正在专注计时的任务。专注期间，没有明确指定任务的日志都记到它名下。
+    @Published public private(set) var focusTaskID: UUID?
+    public let directory: URL
+    @Published public private(set) var hasPendingSave = false
+    private var pendingSave: Task<Void, Never>?
+    public let undoManager = UndoManager()
+    private var dailyBackupKey: String?
+    private var deletedTodo: (task: Todo, date: Date, index: Int)?
+    private var indexedTasks: [ScheduledTask]?
+    private var indexedDeadlines: [String: [ScheduledTask]]?
+    private var nextTaskNumber = 1
+    public var backupsDirectory: URL { directory.appendingPathComponent("Backups", isDirectory: true) }
+    public var fileURL: URL { directory.appendingPathComponent("journal.json") }
+    public var backupURL: URL { directory.appendingPathComponent("journal.backup.json") }
+
+    /// 默认的数据目录；命令行和应用共用，`DAYLEAF_DATA_DIR` 可以覆盖。
+    public nonisolated static func defaultDirectory(environment: [String: String] = ProcessInfo.processInfo.environment) -> URL {
+        if let override = environment["DAYLEAF_DATA_DIR"], !override.isEmpty { return URL(fileURLWithPath: override, isDirectory: true) }
+        return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("Dayleaf", isDirectory: true)
+    }
+
+    /// `readOnlySnapshot`：给命令行用的纯只读打开——不创建目录、不写备份、不做迁移落盘，任何修改接口都不生效。
+    /// 数据里的旧格式仍会在内存里按新模型解读，所以读到的内容和应用里一致。
+    public init(directory: URL? = nil, readOnlySnapshot: Bool = false) {
+        self.directory = directory ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Dayleaf", isDirectory: true)
+        undoManager.groupsByEvent = false
+        undoManager.levelsOfUndo = 100
+        do {
+            if !readOnlySnapshot { try FileManager.default.createDirectory(at: self.directory, withIntermediateDirectories: true) }
+            if FileManager.default.fileExists(atPath: fileURL.path) {
+                let data = try Data(contentsOf: fileURL)
+                let document = try JSONDecoder().decode(JournalDocument.self, from: data)
+                guard (1...6).contains(document.version) else {
+                    throw CocoaError(.fileReadUnknown)
+                }
+                days = document.days
+                if !readOnlySnapshot { try data.write(to: backupURL, options: .atomic) }
+                nextTaskNumber = max(document.nextTaskNumber ?? 1, (days.values.flatMap(\.todos).compactMap(\.number).max() ?? 0) + 1)
+                if document.version < 6 {
+                    // 旧版本里任务属于某一天；新模型里那一天就是它的截止日期。迁移前先单独留一份原文件。
+                    if !readOnlySnapshot {
+                        try FileManager.default.createDirectory(at: backupsDirectory, withIntermediateDirectories: true)
+                        try data.write(to: backupsDirectory.appendingPathComponent("before-ddl-migration-v\(document.version).json"), options: .atomic)
+                    }
+                    adoptScheduledDayAsDeadline(in: &days)
+                    hasPendingSave = true
+                }
+                if assignMissingNumbers(in: &days) { hasPendingSave = true }
+            }
+            if readOnlySnapshot { isReadOnly = true; hasPendingSave = false }
+        } catch {
+            isReadOnly = true
+            errorMessage = "无法读取日记，已停止写入以保护原文件。请在数据文件夹中检查 journal.json 和备份。\n\(error.localizedDescription)"
+        }
+        if hasPendingSave, !isReadOnly { save() }
+    }
+
+    private func allocate(_ todo: Todo) -> Todo {
+        var numbered = todo
+        numbered.number = nextTaskNumber
+        nextTaskNumber += 1
+        return numbered
+    }
+
+    /// 没有截止日期的旧任务，用它原来所在的那一天作为截止日期（全天）。
+    private func adoptScheduledDayAsDeadline(in days: inout [String: DayEntry]) {
+        for (key, entry) in days {
+            guard let date = JournalDates.date(for: key) else { continue }
+            var updated = entry
+            for index in updated.todos.indices where updated.todos[index].dueDate == nil {
+                updated.todos[index].dueDate = date
+                updated.todos[index].dueHasTime = false
+            }
+            days[key] = updated
+        }
+    }
+
+    /// 给还没有编号的旧任务按「日期、清单顺序」补上永久编号，结果是确定的。
+    @discardableResult
+    private func assignMissingNumbers(in days: inout [String: DayEntry]) -> Bool {
+        var changed = false
+        for key in days.keys.sorted() {
+            guard var entry = days[key] else { continue }
+            for index in entry.todos.indices where entry.todos[index].number == nil {
+                entry.todos[index].number = nextTaskNumber
+                nextTaskNumber += 1
+                changed = true
+            }
+            days[key] = entry
+        }
+        return changed
+    }
+
+    public func entry(for date: Date) -> DayEntry {
+        days[JournalDates.key(date)] ?? DayEntry()
+    }
+
+    public func addTodo(_ title: String, on date: Date) {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return }
+        change(date) { $0.todos.append(allocate(Todo(title: title))) }
+    }
+
+    public func toggleTodo(_ id: UUID, on date: Date, now: Date = Date()) {
+        guard !isReadOnly else { return }
+        var updated = days
+        toggleTask(id, on: date, now: now, in: &updated)
+        replaceDays(updated, action: "完成状态")
+    }
+
+    private func toggleTask(_ id: UUID, on date: Date, now: Date, in updated: inout [String: DayEntry]) {
+        let key = JournalDates.key(date)
+        guard let index = updated[key]?.todos.firstIndex(where: { $0.id == id }) else { return }
+        updated[key]!.todos[index].completed.toggle()
+        let task = updated[key]!.todos[index]
+        var occurrence = task.repeatRule.nextDate(after: JournalDates.calendar.startOfDay(for: date), monthDay: task.repeatMonthDay)
+        while let candidate = occurrence, candidate <= JournalDates.calendar.startOfDay(for: now) {
+            occurrence = task.repeatRule.nextDate(after: candidate, monthDay: task.repeatMonthDay)
+        }
+        if task.completed, task.nextOccurrenceID == nil, let nextDate = occurrence {
+            var next = allocate(task)
+            next.id = UUID()
+            next.completed = false
+            next.nextOccurrenceID = nil
+            if let due = task.dueDate {
+                let offset = JournalDates.calendar.dateComponents([.day], from: JournalDates.calendar.startOfDay(for: date), to: nextDate).day!
+                next.dueDate = JournalDates.calendar.date(byAdding: .day, value: offset, to: due)
+            }
+            updated[key]!.todos[index].nextOccurrenceID = next.id
+            var nextEntry = updated[JournalDates.key(nextDate)] ?? DayEntry()
+            nextEntry.todos.append(next)
+            updated[JournalDates.key(nextDate)] = nextEntry
+        }
+    }
+
+    public func renameTodo(_ id: UUID, title: String, on date: Date) {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { deleteTodo(id, on: date); return }
+        change(date) { entry in
+            guard let index = entry.todos.firstIndex(where: { $0.id == id }) else { return }
+            // 标题里写的 #标签 移到标签字段，和新建时一致。
+            let parsed = TagText.extract(from: title)
+            entry.todos[index].title = parsed.title
+            entry.todos[index].tags = TagText.merge(entry.todos[index].tags, parsed.tags)
+        }
+    }
+
+    public func deleteTodo(_ id: UUID, on date: Date) {
+        guard !isReadOnly, let index = entry(for: date).todos.firstIndex(where: { $0.id == id }) else { return }
+        deletedTodo = (entry(for: date).todos[index], date, index)
+        canUndoDelete = true
+        change(date, action: "删除任务") { $0.todos.remove(at: index) }
+    }
+
+    public func renameCalendarName(_ id: UUID, name: String, on date: Date) {
+        change(date) { entry in
+            guard let index = entry.todos.firstIndex(where: { $0.id == id }) else { return }
+            entry.todos[index].calendarName = name.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        }
+    }
+
+    public func undoDelete() {
+        guard let deletedTodo, locate(deletedTodo.task.id) == nil else { return }
+        change(deletedTodo.date) { $0.todos.insert(deletedTodo.task, at: min(deletedTodo.index, $0.todos.count)) }
+        self.deletedTodo = nil
+        canUndoDelete = false
+    }
+
+    public func undo() {
+        guard !isReadOnly else { return }
+        undoManager.undo()
+        canUndoDelete = false
+        objectWillChange.send()
+    }
+
+    public func redo() {
+        guard !isReadOnly else { return }
+        undoManager.redo()
+        objectWillChange.send()
+    }
+
+    public func setSummary(_ summary: String, on date: Date) {
+        change(date, debounce: true) { $0.summary = summary }
+    }
+
+    public func setLogDraft(_ text: String, on date: Date) {
+        change(date, debounce: true) { $0.logDraft = text }
+    }
+
+    public func setLogTask(_ id: UUID?, on date: Date) {
+        change(date, debounce: true) { $0.logTaskID = id }
+    }
+
+    /// 修改一条已经提交的日志所关联的任务（nil 取消关联），可撤销。历史日志也能补打标签。
+    public func setLogTask(_ taskID: UUID?, forLog logID: UUID, on date: Date) {
+        let located = taskID.flatMap(locate)
+        change(date, action: "修改日志关联") { entry in
+            guard let index = entry.logs.firstIndex(where: { $0.id == logID }) else { return }
+            if let located {
+                entry.logs[index].taskID = located.id
+                entry.logs[index].taskTitle = String(TaskText.rendered(located.task.title).characters)
+                entry.logs[index].taskNumber = taskNumber(located.id, on: located.date)
+                entry.logs[index].taskTags = located.task.tags
+            } else {
+                entry.logs[index].taskID = nil
+                entry.logs[index].taskTitle = nil
+                entry.logs[index].taskNumber = nil
+                entry.logs[index].taskTags = []
+            }
+        }
+    }
+
+    @discardableResult
+    public func commitLog(on date: Date, now: Date = Date()) throws -> LogCommand {
+        guard !isReadOnly else { throw LogInputError.readOnly }
+        let entry = entry(for: date)
+        let images = entry.logDraftImages
+        // 只贴了图片、没有文字时，作为一条随手记录提交。
+        let command = entry.logDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !images.isEmpty
+            ? LogCommand.entry(.note, "") : try LogCommand.parse(entry.logDraft)
+        switch command {
+        case .help, .summary, .filter: return command
+        case .link(let number):
+            var linkedID: UUID?
+            if let number {
+                guard let located = locate(number: number) else { throw LogInputError.unknownTask(number) }
+                linkedID = located.id
+            }
+            change(date, debounce: true) { $0.logTaskID = linkedID; $0.logDraft = "" }
+            return command
+        case .entry: break
+        }
+        guard case let .entry(kind, rawBody) = command else { return command }
+        // 正文开头的 #N 直接指向当天清单里的第 N 条任务；写了 / 命令却找不到时报错，纯文字则当作普通内容。
+        var body = rawBody
+        var inline: ScheduledTask?
+        let split = LogCommand.splitTaskReference(rawBody)
+        if let number = split.number {
+            if let located = locate(number: number) {
+                inline = located
+                body = split.rest
+            } else if entry.logDraft.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("/") {
+                throw LogInputError.unknownTask(number)
+            }
+        }
+        // 明确指定的任务（正文里的 #N、手动选的关联）优先；都没有时，专注中的任务兜底。
+        let explicit = inline ?? entry.logTaskID.flatMap(locate)
+        if inline == nil, entry.logTaskID != nil, explicit == nil { throw LogInputError.missingTask }
+        let linked = explicit ?? focusTask
+        let title = linked.map { String(TaskText.rendered($0.task.title).characters) }
+        // 只有明确指定的任务才会在空正文时借用标题，/done 也只完成明确指定的任务；专注兜底的关联不会替用户完成任务。
+        let text = body.isEmpty ? (explicit != nil ? title ?? "" : "") : body
+        guard !text.isEmpty || !images.isEmpty else { throw LogInputError.empty }
+        var updated = days
+        if kind == .done, let explicit, !explicit.task.completed {
+            toggleTask(explicit.id, on: explicit.date, now: now, in: &updated)
+        }
+        let key = JournalDates.key(date)
+        var day = updated[key] ?? DayEntry()
+        day.logs.append(DailyLogEntry(createdAt: now, kind: kind, text: text, taskID: linked?.id, taskTitle: title,
+                                     taskNumber: linked.flatMap { taskNumber($0.id, on: $0.date) },
+                                     taskTags: linked?.task.tags ?? [], images: images))
+        day.logDraft = ""
+        day.logTaskID = nil
+        day.logDraftImages = []
+        updated[key] = day
+        replaceDays(updated, action: "添加日志")
+        return command
+    }
+
+    public func updateLog(_ id: UUID, text: String, on date: Date) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty, entry(for: date).logs.first(where: { $0.id == id })?.images.isEmpty != false { deleteLog(id, on: date); return }
+        change(date) { entry in
+            guard let index = entry.logs.firstIndex(where: { $0.id == id }) else { return }
+            entry.logs[index].text = text
+        }
+    }
+
+    public func deleteLog(_ id: UUID, on date: Date) {
+        change(date, action: "删除日志") { $0.logs.removeAll { $0.id == id } }
+    }
+
+    public func applyReview(_ text: String, on date: Date, append: Bool) {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        change(date) { entry in
+            entry.summary = append && !entry.summary.isEmpty ? entry.summary + "\n\n" + text : text
+        }
+    }
+
+    public func setDeadlineDraft(_ text: String, on date: Date) {
+        change(date, debounce: true) { $0.deadlineDraft = text }
+    }
+
+    public func commitDeadline(on date: Date, dueDate: Date? = nil) {
+        change(date) { entry in
+            entry.todos.append(contentsOf: DayEntry.deadlineItems(from: entry.deadlineDraft).map { item in
+                var task = allocate(item)
+                task.dueDate = dueDate.map { JournalDates.calendar.startOfDay(for: $0) }
+                return task
+            })
+            entry.deadlineDraft = ""
+        }
+    }
+
+    public func toggleDeadline(_ id: UUID, on date: Date) {
+        toggleTodo(id, on: date)
+    }
+
+    public func renameDeadline(_ id: UUID, title: String, on date: Date) {
+        renameTodo(id, title: title, on: date)
+    }
+
+    public func deleteDeadline(_ id: UUID, on date: Date) {
+        deleteTodo(id, on: date)
+    }
+
+    /// 逐行解析输入框草稿（识别日期、时间、提醒、重复），一次撤销即可还原。
+    /// 识别出的日期是任务的截止日期；没写日期就是还没分配日期的任务。任务本身不属于某一天。
+    @discardableResult
+    public func commitDraft(on date: Date, now: Date = Date(), defaultDue: Bool = false) -> [ScheduledTask] {
+        guard !isReadOnly else { return [] }
+        let key = JournalDates.key(date)
+        let lines = (days[key]?.deadlineDraft ?? "").components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        var updated = days
+        var added: [ScheduledTask] = []
+        for line in lines {
+            let resolved = QuickAdd.parse(line, now: now).resolve(defaultDay: date, defaultDue: defaultDue)
+            var entry = updated[key] ?? DayEntry()
+            let numbered = allocate(resolved.todo)
+            entry.todos.append(numbered)
+            updated[key] = entry
+            added.append(ScheduledTask(date: date, task: numbered))
+        }
+        updated[key]?.deadlineDraft = ""
+        if let entry = updated[key], !entry.hasContent { updated[key] = nil }
+        replaceDays(updated, action: "添加待办")
+        return added
+    }
+
+    /// 全局快速添加：识别日期、时间、提醒和重复；识别出的日期成为截止日期。
+    @discardableResult
+    public func addParsedTodo(_ text: String, on date: Date, now: Date = Date()) -> ScheduledTask? {
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !isReadOnly, !text.isEmpty else { return nil }
+        let resolved = QuickAdd.parse(text, now: now).resolve(defaultDay: date)
+        var updated = days
+        let key = JournalDates.key(date)
+        var entry = updated[key] ?? DayEntry()
+        let numbered = allocate(resolved.todo)
+        entry.todos.append(numbered)
+        updated[key] = entry
+        replaceDays(updated, action: "添加待办")
+        return ScheduledTask(date: date, task: numbered)
+    }
+
+    /// 专注计时的开始、结束记录：写进当天终端日志，关联任务，但带「专注」标记，笔记视图不显示。
+    /// `seconds` 大于 0 时同时累加到任务的专注时长，和日志一起作为一次操作（撤销时一并还原）。
+    @discardableResult
+    public func addFocusLog(_ text: String, taskID: UUID, now: Date = Date(), seconds: TimeInterval = 0) -> UUID? {
+        guard !isReadOnly, let located = locate(taskID) else { return nil }
+        var updated = days
+        if seconds > 0 {
+            let homeKey = JournalDates.key(located.date)
+            if let index = updated[homeKey]?.todos.firstIndex(where: { $0.id == taskID }) {
+                updated[homeKey]!.todos[index].focusSeconds += seconds
+            }
+        }
+        let key = JournalDates.key(now)
+        var entry = updated[key] ?? DayEntry()
+        let log = DailyLogEntry(createdAt: now, kind: .note, text: text, taskID: located.id,
+                                taskTitle: String(TaskText.rendered(located.task.title).characters),
+                                taskNumber: located.task.number, taskTags: located.task.tags, focus: true)
+        entry.logs.append(log)
+        updated[key] = entry
+        replaceDays(updated, action: "专注记录")
+        return log.id
+    }
+
+    public func setFocusTask(_ id: UUID?) {
+        if focusTaskID != id { focusTaskID = id }
+    }
+
+    /// 专注中的任务；任务已被删除时为 nil（日志照常记录，只是不再关联）。
+    public var focusTask: ScheduledTask? { focusTaskID.flatMap(locate) }
+
+    /// 某个任务的笔记：关联到它的日志，不含专注计时记录，按时间从早到晚。
+    public func notes(for taskID: UUID) -> [LoggedLog] {
+        logs(linkedTo: [taskID]).filter { !$0.log.focus }
+    }
+
+    /// 全局快速记录：不经过当天的输入草稿，直接追加一条日志。
+    @discardableResult
+    public func quickLog(_ text: String, images: [String] = [], taskID: UUID? = nil, on date: Date, now: Date = Date()) throws -> LogCommand {
+        guard !isReadOnly else { throw LogInputError.readOnly }
+        let command = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !images.isEmpty
+            ? LogCommand.entry(.note, "") : try LogCommand.parse(text)
+        guard case let .entry(kind, body) = command else { return command }
+        guard !body.isEmpty || !images.isEmpty else { throw LogInputError.empty }
+        var updated = days
+        let key = JournalDates.key(date)
+        var entry = updated[key] ?? DayEntry()
+        let linked = taskID.flatMap(locate) ?? focusTask
+        entry.logs.append(DailyLogEntry(createdAt: now, kind: kind, text: body,
+                                        taskID: linked?.id, taskTitle: linked.map { String(TaskText.rendered($0.task.title).characters) },
+                                        taskNumber: linked?.task.number, taskTags: linked?.task.tags ?? [], images: images))
+        updated[key] = entry
+        replaceDays(updated, action: "添加日志")
+        return command
+    }
+
+    /// 截止日期早于 `date` 且未完成的任务数量。
+    public func unfinishedCount(before date: Date) -> Int {
+        let start = JournalDates.calendar.startOfDay(for: date)
+        return tasks().filter { !$0.task.completed && $0.task.effectiveDeadline.map { $0 <= start } == true }.count
+    }
+
+    /// 把已逾期未完成任务的截止日期改到 `date`（全天），作为一次操作撤销。返回改动的数量。
+    @discardableResult
+    public func rolloverUnfinished(to date: Date) -> Int {
+        guard !isReadOnly else { return 0 }
+        let target = JournalDates.calendar.startOfDay(for: date)
+        let late = tasks().filter { !$0.task.completed && $0.task.effectiveDeadline.map { $0 <= target } == true }
+        guard !late.isEmpty else { return 0 }
+        var updated = days
+        for item in late {
+            let key = JournalDates.key(item.date)
+            guard let index = updated[key]?.todos.firstIndex(where: { $0.id == item.id }) else { continue }
+            updated[key]!.todos[index].dueDate = target
+            updated[key]!.todos[index].dueHasTime = false
+        }
+        replaceDays(updated, action: "移到今天")
+        return late.count
+    }
+
+    public func overdueCount(now: Date = Date()) -> Int {
+        tasks(filter: .overdue, now: now).count
+    }
+
+    // MARK: - 笔记（按任务汇总日志）
+
+    public struct NoteTopic: Identifiable {
+        public let id: UUID
+        public let number: Int?
+        public let title: String
+        public let count: Int
+        public let imageCount: Int
+        public let lastActivity: Date
+        public let completed: Bool
+        public let deleted: Bool
+        public let dueDate: Date?
+        public let focusSeconds: TimeInterval
+        public let tags: [String]
+    }
+
+    /// 至少有一条日志关联的任务，最近有笔记的排在前面。
+    public func noteTopics() -> [NoteTopic] {
+        var info: [UUID: (count: Int, images: Int, latest: Date, title: String, number: Int?)] = [:]
+        for day in days.values {
+            for log in day.logs where !log.focus {
+                guard let id = log.taskID else { continue }
+                let previous = info[id]
+                info[id] = ((previous?.count ?? 0) + 1, (previous?.images ?? 0) + log.images.count, max(previous?.latest ?? .distantPast, log.createdAt),
+                            log.taskTitle ?? previous?.title ?? "", log.taskNumber ?? previous?.number)
+            }
+        }
+        return info.map { id, value in
+            let located = locate(id)
+            return NoteTopic(id: id, number: located?.task.number ?? value.number,
+                             title: located.map { String(TaskText.rendered($0.task.title).characters) } ?? value.title,
+                             count: value.count, imageCount: value.images, lastActivity: value.latest,
+                             completed: located?.task.completed ?? false, deleted: located == nil, dueDate: located?.task.dueDate,
+                             focusSeconds: located?.task.focusSeconds ?? 0, tags: located?.task.tags ?? [])
+        }.sorted { $0.lastActivity > $1.lastActivity }
+    }
+
+    // MARK: - 按任务筛选日志
+
+    public struct LoggedLog: Identifiable {
+        public let key: String
+        public let date: Date
+        public let log: DailyLogEntry
+        public var id: UUID { log.id }
+    }
+
+    public struct LogTaskSummary: Identifiable {
+        public let id: UUID
+        public let title: String
+        public let number: Int?
+        public let date: Date?
+        public let count: Int
+        public let deleted: Bool
+    }
+
+    /// 全部日志（跨日期），按时间从早到晚；`includeFocus` 为 false 时不含专注计时的开始、结束记录。
+    public func allLogs(includeFocus: Bool = false) -> [LoggedLog] {
+        days.keys.sorted().flatMap { key -> [LoggedLog] in
+            guard let date = JournalDates.date(for: key), let day = days[key] else { return [] }
+            return day.logs.filter { includeFocus || !$0.focus }
+                .sorted { $0.createdAt < $1.createdAt }.map { LoggedLog(key: key, date: date, log: $0) }
+        }
+    }
+
+    /// 与指定任务相关的全部日志（跨日期），按时间从早到晚。
+    public func logs(linkedTo ids: Set<UUID>) -> [LoggedLog] {
+        guard !ids.isEmpty else { return [] }
+        return days.keys.sorted().flatMap { key -> [LoggedLog] in
+            guard let date = JournalDates.date(for: key), let day = days[key] else { return [] }
+            return day.logs.filter { $0.taskID.map(ids.contains) == true }.map { LoggedLog(key: key, date: date, log: $0) }
+        }
+    }
+
+    /// 可用于筛选的任务：`date` 当天清单里的任务，以及所有被日志关联过的任务（含已删除的）。
+    public func logTaskSummaries(on date: Date) -> [LogTaskSummary] {
+        var counts: [UUID: (count: Int, latest: Date, title: String)] = [:]
+        for day in days.values {
+            for log in day.logs {
+                guard let id = log.taskID else { continue }
+                let previous = counts[id]
+                counts[id] = ((previous?.count ?? 0) + 1, max(previous?.latest ?? .distantPast, log.createdAt), log.taskTitle ?? previous?.title ?? "")
+            }
+        }
+        var result: [LogTaskSummary] = []
+        var seen = Set<UUID>()
+        for item in sortedTasks() where !item.task.completed {
+            seen.insert(item.id)
+            result.append(LogTaskSummary(id: item.id, title: String(TaskText.rendered(item.task.title).characters), number: item.task.number,
+                                         date: item.date, count: counts[item.id]?.count ?? 0, deleted: false))
+        }
+        let others = counts.filter { !seen.contains($0.key) }.sorted { $0.value.latest > $1.value.latest }
+        for (id, info) in others {
+            let located = locate(id)
+            result.append(LogTaskSummary(id: id, title: located.map { String(TaskText.rendered($0.task.title).characters) } ?? info.title,
+                                         number: located.flatMap { taskNumber($0.id, on: $0.date) }, date: located?.date,
+                                         count: info.count, deleted: located == nil))
+        }
+        return result
+    }
+
+    // MARK: - 日志图片
+
+    public var imagesDirectory: URL { directory.appendingPathComponent("Images", isDirectory: true) }
+
+    public func imageURL(_ name: String) -> URL { imagesDirectory.appendingPathComponent(name) }
+
+    /// 保存已处理好的图片数据，返回文件名。
+    public func storeImage(_ data: Data, fileExtension: String) throws -> String {
+        guard !isReadOnly else { throw LogInputError.readOnly }
+        try FileManager.default.createDirectory(at: imagesDirectory, withIntermediateDirectories: true)
+        let name = UUID().uuidString.lowercased() + "." + fileExtension
+        try data.write(to: imageURL(name), options: .atomic)
+        return name
+    }
+
+    public func addDraftImage(_ name: String, on date: Date) {
+        change(date, debounce: true) { if !$0.logDraftImages.contains(name) { $0.logDraftImages.append(name) } }
+    }
+
+    public func removeDraftImage(_ name: String, on date: Date) {
+        change(date, debounce: true) { $0.logDraftImages.removeAll { $0 == name } }
+    }
+
+    /// 尚未做文字识别的图片文件名。
+    public func imagesMissingText() -> [String] {
+        days.values.flatMap { $0.logs }.flatMap { log in log.images.filter { log.imageText[$0] == nil } }
+    }
+
+    /// 写入识别结果；不进入撤销栈，也不改变其他内容。
+    public func setImageText(_ text: String, image name: String) {
+        guard !isReadOnly else { return }
+        var updated = days
+        var changed = false
+        for (key, entry) in days {
+            guard let index = entry.logs.firstIndex(where: { $0.images.contains(name) }) else { continue }
+            updated[key]!.logs[index].imageText[name] = text
+            changed = true
+        }
+        guard changed else { return }
+        days = updated
+        hasPendingSave = true
+        scheduleSave()
+    }
+
+    /// 导出为文件夹：journal.json 加上被引用的全部图片。
+    public func exportFolder(to folder: URL) throws {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try export(to: folder.appendingPathComponent("journal.json"))
+        let names = referencedImageNames(in: days)
+        guard !names.isEmpty else { return }
+        let target = folder.appendingPathComponent("Images", isDirectory: true)
+        try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true)
+        for name in names where FileManager.default.fileExists(atPath: imageURL(name).path) {
+            let destination = target.appendingPathComponent(name)
+            if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
+            try FileManager.default.copyItem(at: imageURL(name), to: destination)
+        }
+    }
+
+    /// 从导出的文件夹复制图片，已存在的同名文件保持不动。返回复制的数量。
+    @discardableResult
+    public func importImages(from folder: URL) throws -> Int {
+        let source = folder.appendingPathComponent("Images", isDirectory: true)
+        guard let files = try? FileManager.default.contentsOfDirectory(at: source, includingPropertiesForKeys: nil) else { return 0 }
+        try FileManager.default.createDirectory(at: imagesDirectory, withIntermediateDirectories: true)
+        var copied = 0
+        for file in files where !FileManager.default.fileExists(atPath: imageURL(file.lastPathComponent).path) {
+            try FileManager.default.copyItem(at: file, to: imageURL(file.lastPathComponent))
+            copied += 1
+        }
+        return copied
+    }
+
+    private func referencedImageNames(in days: [String: DayEntry]) -> Set<String> {
+        Set(days.values.flatMap { $0.logs.flatMap(\.images) + $0.logDraftImages })
+    }
+
+    /// 删除不再被当前数据、每日快照和上次启动备份引用的图片，之后撤销或恢复备份仍然安全。
+    public func unusedImageNames() -> [String] {
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: imagesDirectory.path), !files.isEmpty else { return [] }
+        var keep = referencedImageNames(in: days)
+        var documents = [backupURL]
+        documents += (try? FileManager.default.contentsOfDirectory(at: backupsDirectory, includingPropertiesForKeys: nil)) ?? []
+        for url in documents where url.pathExtension == "json" {
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { continue }
+            for name in files where !keep.contains(name) && text.contains(name) { keep.insert(name) }
+        }
+        return files.filter { !keep.contains($0) }
+    }
+
+    @discardableResult
+    public func removeUnusedImages(olderThan age: TimeInterval = 3600, now: Date = Date()) -> Int {
+        var removed = 0
+        for name in unusedImageNames() {
+            let url = imageURL(name)
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            guard now.timeIntervalSince(modified) >= age else { continue }
+            if (try? FileManager.default.removeItem(at: url)) != nil { removed += 1 }
+        }
+        return removed
+    }
+
+    public func save() {
+        guard !isReadOnly else { return }
+        pendingSave?.cancel()
+        pendingSave = nil
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber))
+            try makeDailyBackup(data)
+            try data.write(to: fileURL, options: .atomic)
+            lastSaved = Date()
+            hasPendingSave = false
+            errorMessage = nil
+        } catch {
+            errorMessage = "保存失败，当前修改仍保留在内存中。请释放磁盘空间或检查权限后重试。\n\(error.localizedDescription)"
+        }
+    }
+
+    public func export(to url: URL) throws {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber)).write(to: url, options: .atomic)
+    }
+
+    public func tasks(matching query: String = "", filter: AgendaFilter = .all, now: Date = Date()) -> [ScheduledTask] {
+        if indexedTasks == nil {
+            indexedTasks = days.flatMap { key, entry -> [ScheduledTask] in
+                guard let date = JournalDates.date(for: key) else { return [] }
+                return entry.todos.map { ScheduledTask(date: date, task: $0) }
+            }.sorted { $0.date == $1.date ? $0.task.title < $1.task.title : $0.date < $1.date }
+        }
+        guard !query.isEmpty || filter != .all else { return indexedTasks! }
+        // 「#标签」只找带这个标签（含子标签）的待办；普通词也会匹配标签名。
+        let tag = TagText.searchTag(query)
+        return indexedTasks!.filter { item in
+            guard filter.includes(item.task, now: now) else { return false }
+            if let tag { return item.task.tags.contains { TagText.matches($0, query: tag) } }
+            return query.isEmpty || item.task.title.localizedStandardContains(query) || item.task.calendarName.localizedStandardContains(query)
+                || item.task.tags.contains { $0.localizedStandardContains(query) }
+        }
+    }
+
+    public var calendarDeadlines: [String: [ScheduledTask]] {
+        if indexedDeadlines == nil {
+            indexedDeadlines = Dictionary(grouping: tasks().filter { $0.task.dueDate != nil }) {
+                JournalDates.key($0.task.dueDate!)
+            }.mapValues { $0.sorted(by: ScheduledTask.listOrder) }
+        }
+        return indexedDeadlines!
+    }
+
+    private func invalidateTaskIndex() {
+        indexedTasks = nil
+        indexedDeadlines = nil
+    }
+
+    public func locate(_ id: UUID) -> ScheduledTask? {
+        tasks().first { $0.id == id }
+    }
+
+    /// 任务的永久编号（`on` 仅为兼容旧调用）。
+    public func taskNumber(_ id: UUID, on date: Date) -> Int? {
+        locate(id)?.task.number
+    }
+
+    /// 按永久编号找任务。
+    public func locate(number: Int) -> ScheduledTask? {
+        tasks().first { $0.task.number == number }
+    }
+
+    /// 全部任务，按截止时间从早到晚；没有截止日期的排在最后，同一时间按编号。手动拖过位置的任务按它的手动位置排。
+    public func sortedTasks() -> [ScheduledTask] {
+        tasks().sorted(by: ScheduledTask.listOrder)
+    }
+
+    /// 手动调整顺序：`ids` 是这些任务想要的从上到下的顺序（通常是清单里同一分组的任务）。
+    /// 做法是把它们原有的排序键按新顺序重新分配，所以只改变它们彼此的先后，不会挤到别的分组里。一次操作，可撤销。
+    public func reorderTasks(_ ids: [UUID]) {
+        guard !isReadOnly, ids.count > 1 else { return }
+        let located = ids.compactMap { locate($0) }
+        guard located.count == ids.count else { return }
+        var keys: [Double] = []
+        for key in located.map(\.task.sortKey).sorted() {
+            // 键相同（同一天、没有日期）时拉开一点，否则新顺序会被编号顺序盖掉。
+            keys.append(keys.last.map { max(key, $0 + 0.001) } ?? key)
+        }
+        var updated = days
+        for (item, key) in zip(located, keys) {
+            let dayKey = JournalDates.key(item.date)
+            guard let index = updated[dayKey]?.todos.firstIndex(where: { $0.id == item.id }) else { continue }
+            updated[dayKey]!.todos[index].listPosition = key
+        }
+        replaceDays(updated, action: "调整顺序")
+    }
+
+    /// 设置或清除截止日期。`keepingTime` 为 true 时保留原来的时分，只换日期（拖到日历某天时使用）。
+    public func setDeadline(_ id: UUID, to date: Date?, keepingTime: Bool = true) {
+        guard !isReadOnly, let located = locate(id) else { return }
+        let calendar = JournalDates.calendar
+        var due: Date?
+        var hasTime = false
+        if let date {
+            if keepingTime, located.task.dueHasTime, let old = located.task.dueDate {
+                let time = calendar.dateComponents([.hour, .minute], from: old)
+                due = calendar.date(bySettingHour: time.hour ?? 0, minute: time.minute ?? 0, second: 0, of: date)
+                hasTime = true
+            } else {
+                due = calendar.startOfDay(for: date)
+            }
+        }
+        updateTodo(id, scheduledDate: located.date, dueDate: due, dueHasTime: hasTime,
+                   reminderMinutes: located.task.reminderMinutes, repeatRule: located.task.repeatRule)
+    }
+
+    public func calendarTasks(on date: Date, includeScheduled: Bool = false) -> [ScheduledTask] {
+        let scheduled = includeScheduled ? entry(for: date).todos.map { ScheduledTask(date: date, task: $0) } : []
+        let identifiers = Set(scheduled.map(\.id))
+        let due = (calendarDeadlines[JournalDates.key(date)] ?? []).filter { !identifiers.contains($0.id) }
+        return scheduled + due
+    }
+
+    public func moveTodo(_ id: UUID, to destination: Date) {
+        guard !isReadOnly, let located = locate(id), JournalDates.key(located.date) != JournalDates.key(destination) else { return }
+        updateTodo(id, scheduledDate: destination, dueDate: located.task.dueDate, dueHasTime: located.task.dueHasTime,
+                   reminderMinutes: located.task.reminderMinutes, repeatRule: located.task.repeatRule)
+    }
+
+    public func placeTodo(_ id: UUID, on destination: Date, relativeTo anchorID: UUID? = nil, after: Bool = false, debounce: Bool = false) {
+        guard !isReadOnly, anchorID != id, let located = locate(id) else { return }
+        let sourceKey = JournalDates.key(located.date)
+        let targetKey = JournalDates.key(destination)
+        guard var source = days[sourceKey], let sourceIndex = source.todos.firstIndex(where: { $0.id == id }) else { return }
+        if let anchorID, days[targetKey]?.todos.contains(where: { $0.id == anchorID }) != true { return }
+        let task = source.todos.remove(at: sourceIndex)
+        var updated = days
+        updated[sourceKey] = source.hasContent ? source : nil
+        var target = updated[targetKey] ?? DayEntry()
+        if let anchorID, let anchorIndex = target.todos.firstIndex(where: { $0.id == anchorID }) {
+            target.todos.insert(task, at: anchorIndex + (after ? 1 : 0))
+        } else {
+            target.todos.append(task)
+        }
+        updated[targetKey] = target
+        replaceDays(updated, action: sourceKey == targetKey ? "调整顺序" : "移动任务", debounce: debounce)
+    }
+
+    public func updateTodo(_ id: UUID, scheduledDate: Date, dueDate: Date?, dueHasTime: Bool, reminderMinutes: Int?, repeatRule: RepeatRule, calendarName: String? = nil, tags: [String]? = nil) {
+        guard !isReadOnly, let located = locate(id) else { return }
+        let sourceKey = JournalDates.key(located.date)
+        guard var source = days[sourceKey], let index = source.todos.firstIndex(where: { $0.id == id }) else { return }
+        var task = source.todos[index]
+        if let calendarName { task.calendarName = calendarName.split(whereSeparator: \.isWhitespace).joined(separator: " ") }
+        if let tags { task.tags = TagText.merge([], tags.compactMap(TagText.normalize)) }
+        task.dueDate = dueDate.map { dueHasTime ? $0 : JournalDates.calendar.startOfDay(for: $0) }
+        task.dueHasTime = dueDate != nil && dueHasTime
+        task.reminderMinutes = dueDate == nil ? nil : reminderMinutes
+        task.repeatRule = repeatRule
+        if repeatRule == .monthly, task.repeatMonthDay == nil { task.repeatMonthDay = JournalDates.calendar.component(.day, from: scheduledDate) }
+        var updated = days
+        let targetKey = JournalDates.key(scheduledDate)
+        if sourceKey == targetKey {
+            source.todos[index] = task
+            updated[sourceKey] = source
+        } else {
+            source.todos.remove(at: index)
+            updated[sourceKey] = source.hasContent ? source : nil
+            var target = updated[targetKey] ?? DayEntry()
+            target.todos.append(task)
+            updated[targetKey] = target
+        }
+        replaceDays(updated, action: "安排任务")
+    }
+
+    public func backups() -> [BackupRecord] {
+        var urls = (try? FileManager.default.contentsOfDirectory(at: backupsDirectory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        if FileManager.default.fileExists(atPath: backupURL.path) { urls.append(backupURL) }
+        return urls.filter { $0.pathExtension == "json" }.map {
+            BackupRecord(url: $0, date: (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast)
+        }.sorted { $0.date > $1.date }
+    }
+
+    public func inspectBackup(_ url: URL) throws -> BackupPreview {
+        let document = try readBackup(url)
+        return BackupPreview(dayCount: document.days.count, taskCount: document.days.values.reduce(0) { $0 + $1.todos.count },
+                             summaryCount: document.days.values.filter { !$0.summary.isEmpty }.count,
+                             logCount: document.days.values.reduce(0) { $0 + $1.logs.count })
+    }
+
+    public func restore(from url: URL) throws {
+        let document = try readBackup(url)
+        try FileManager.default.createDirectory(at: backupsDirectory, withIntermediateDirectories: true)
+        let current = isReadOnly && FileManager.default.fileExists(atPath: fileURL.path)
+            ? try Data(contentsOf: fileURL) : try JSONEncoder().encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber))
+        let recovery = backupsDirectory.appendingPathComponent("before-restore-\(JournalDates.key(Date()))-\(UUID().uuidString).json")
+        try current.write(to: recovery, options: .atomic)
+        isReadOnly = false
+        // 旧版本的备份同样要迁移：所在日期成为截止日期，并补上永久编号。编号只增不减，不会和现有日志里的引用冲突。
+        var restored = document.days
+        if document.version < 6 { adoptScheduledDayAsDeadline(in: &restored) }
+        nextTaskNumber = max(nextTaskNumber, document.nextTaskNumber ?? 1, (restored.values.flatMap(\.todos).compactMap(\.number).max() ?? 0) + 1)
+        assignMissingNumbers(in: &restored)
+        replaceDays(restored, action: "恢复备份", force: true)
+        if let errorMessage { throw NSError(domain: "Dayleaf", code: 1, userInfo: [NSLocalizedDescriptionKey: errorMessage]) }
+    }
+
+    private func readBackup(_ url: URL) throws -> JournalDocument {
+        let document = try JSONDecoder().decode(JournalDocument.self, from: Data(contentsOf: url))
+        guard (1...6).contains(document.version), document.days.keys.allSatisfy({ JournalDates.date(for: $0) != nil }) else { throw CocoaError(.fileReadCorruptFile) }
+        let ids = document.days.values.flatMap { $0.todos.map(\.id) }
+        guard Set(ids).count == ids.count else { throw CocoaError(.fileReadCorruptFile) }
+        let logIDs = document.days.values.flatMap { $0.logs.map(\.id) }
+        guard Set(logIDs).count == logIDs.count else { throw CocoaError(.fileReadCorruptFile) }
+        return document
+    }
+
+    private func makeDailyBackup(_ data: Data) throws {
+        let key = JournalDates.key(Date())
+        guard dailyBackupKey != key else { return }
+        try FileManager.default.createDirectory(at: backupsDirectory, withIntermediateDirectories: true)
+        let daily = backupsDirectory.appendingPathComponent("\(key).json")
+        if !FileManager.default.fileExists(atPath: daily.path) { try data.write(to: daily, options: .atomic) }
+        let snapshots = try FileManager.default.contentsOfDirectory(at: backupsDirectory, includingPropertiesForKeys: nil)
+            .filter { JournalDates.date(for: $0.deletingPathExtension().lastPathComponent) != nil }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+        for obsolete in snapshots.dropFirst(30) { try FileManager.default.removeItem(at: obsolete) }
+        dailyBackupKey = key
+    }
+
+    private func registerUndo(_ previous: [String: DayEntry], replacing updated: [String: DayEntry], action: String) {
+        let grouping = !undoManager.isUndoing && !undoManager.isRedoing
+        if grouping { undoManager.beginUndoGrouping() }
+        undoManager.registerUndo(withTarget: self) { store in
+            var restored = store.days
+            for key in Set(previous.keys).union(updated.keys) {
+                let before = previous[key] ?? DayEntry()
+                let after = updated[key] ?? DayEntry()
+                var current = restored[key] ?? DayEntry()
+                if before.todos != after.todos, current.todos == after.todos { current.todos = before.todos }
+                if before.summary != after.summary, current.summary == after.summary { current.summary = before.summary }
+                if before.deadlineDraft != after.deadlineDraft, current.deadlineDraft == after.deadlineDraft { current.deadlineDraft = before.deadlineDraft }
+                if before.logs != after.logs, current.logs == after.logs { current.logs = before.logs }
+                if before.logDraft != after.logDraft, current.logDraft == after.logDraft { current.logDraft = before.logDraft }
+                if before.logTaskID != after.logTaskID, current.logTaskID == after.logTaskID { current.logTaskID = before.logTaskID }
+                if before.logDraftImages != after.logDraftImages, current.logDraftImages == after.logDraftImages { current.logDraftImages = before.logDraftImages }
+                restored[key] = current.hasContent ? current : nil
+            }
+            store.replaceDays(restored, action: action, force: true)
+        }
+        undoManager.setActionName(action)
+        if grouping {
+            undoManager.endUndoGrouping()
+            lastAction = ActionEvent(id: (lastAction?.id ?? 0) + 1, name: action)
+        }
+    }
+
+    private func replaceDays(_ updated: [String: DayEntry], action: String, force: Bool = false, debounce: Bool = false) {
+        guard !isReadOnly, force || updated != days else { return }
+        registerUndo(days, replacing: updated, action: action)
+        let tasksChanged = Set(days.keys).union(updated.keys).contains(where: { (days[$0]?.todos ?? []) != (updated[$0]?.todos ?? []) })
+        days = updated
+        if tasksChanged { invalidateTaskIndex() }
+        hasPendingSave = true
+        if debounce { scheduleSave() } else { save() }
+    }
+
+    func change(_ date: Date, debounce: Bool = false, action: String = "修改事项", mutation: (inout DayEntry) -> Void) {
+        guard !isReadOnly else { return }
+        let key = JournalDates.key(date)
+        var entry = days[key] ?? DayEntry()
+        mutation(&entry)
+        guard entry != (days[key] ?? DayEntry()) else { return }
+        var updated = days
+        updated[key] = entry.hasContent ? entry : nil
+        if !debounce { registerUndo(days, replacing: updated, action: action) }
+        let tasksChanged = entry.todos != (days[key]?.todos ?? [])
+        days = updated
+        if tasksChanged { invalidateTaskIndex() }
+        hasPendingSave = true
+        if debounce {
+            scheduleSave()
+        } else {
+            save()
+        }
+    }
+
+    private func scheduleSave() {
+        pendingSave?.cancel()
+        pendingSave = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
+            self?.save()
+        }
+    }
+}

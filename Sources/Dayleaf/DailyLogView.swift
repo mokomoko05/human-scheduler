@@ -1,0 +1,661 @@
+import AppKit
+import SwiftUI
+import UniformTypeIdentifiers
+import DayleafCore
+
+enum TerminalPalette {
+    static let panel = Color(white: 0.035)
+    static let surface = Color.black
+    static let text = Color(white: 0.88)
+    static let muted = Color(white: 0.58)
+    static let green = Color(red: 0.49, green: 0.84, blue: 0.55)
+    static let amber = Color(red: 0.94, green: 0.72, blue: 0.35)
+    static let blue = Color(red: 0.43, green: 0.73, blue: 0.96)
+}
+
+@MainActor
+enum LogTaskLabel {
+    static func current(_ task: ScheduledTask, store: JournalStore, logDate: Date) -> String {
+        let number = task.task.number.map { "#\($0)" } ?? "任务"
+        let title = String(TaskText.rendered(task.task.title, alias: task.task.calendarName).characters)
+        return "\(number) \(title)"
+    }
+
+    static func saved(_ log: DailyLogEntry, store: JournalStore, logDate: Date) -> String? {
+        if let id = log.taskID, let task = store.locate(id) { return current(task, store: store, logDate: logDate) }
+        guard let title = log.taskTitle else { return nil }
+        let number = log.taskNumber.map { "#\($0) " } ?? ""
+        return "\(number)\(title)（已删除）"
+    }
+}
+
+struct DailyLogView: View {
+    @ObservedObject var store: JournalStore
+    let date: Date
+    var collapse: (() -> Void)?
+    @EnvironmentObject private var interaction: WorkspaceInteraction
+    @AppStorage("logReviewSplit") private var split = 0.6
+    @State private var showingHelp = false
+    @State private var preparingReview = false
+    @State private var focused = false
+    @State private var error: String?
+    @State private var historyIndex: Int?
+    @State private var pendingDraft = ""
+    @State private var pendingTaskID: UUID?
+    @State private var previewing: ImagePreviewItem?
+    @State private var editingLogID: UUID?
+    @State private var editingLogDate = Date()
+    @State private var showingFilter = false
+    @State private var editText = ""
+    @State private var dropTargeted = false
+
+    private var entry: DayEntry { store.entry(for: date) }
+    private var draft: Binding<String> {
+        Binding(get: { entry.logDraft }, set: {
+            historyIndex = nil
+            error = nil
+            store.setLogDraft($0, on: date)
+        })
+    }
+    private var completions: [String] {
+        let text = entry.logDraft.lowercased()
+        guard focused, text.hasPrefix("/"), !text.contains(where: \.isWhitespace) else { return [] }
+        return LogCommand.commands.filter { $0.hasPrefix(text) }
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            let total = geometry.size.width
+            let left = min(max(total * split, 300), max(300, total - 240))
+            HStack(spacing: 0) {
+                logColumn.frame(width: left)
+                divider(total: total)
+                reviewColumn.frame(maxWidth: .infinity)
+            }
+            .coordinateSpace(name: "logSplit")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .foregroundStyle(TerminalPalette.text)
+        .tint(TerminalPalette.blue)
+        .background(TerminalPalette.panel)
+        .contentShape(Rectangle())
+        .simultaneousGesture(TapGesture().onEnded { interaction.activePane = .summary })
+        .onChange(of: interaction.logFocusRequest) { _ in focused = true }
+        .sheet(isPresented: $preparingReview) {
+            ReviewDraftView(store: store, date: date)
+        }
+        .sheet(item: $previewing) { ImagePreviewSheet(store: store, item: $0) }
+        .environment(\.colorScheme, .dark)
+    }
+
+    /// 左侧：日志流与输入。
+    private var logColumn: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "terminal").foregroundStyle(TerminalPalette.green)
+                Text("\(filtering ? filteredLogs.count : entry.logs.count)").font(.system(size: UIScale.pt(11), design: .monospaced)).foregroundStyle(TerminalPalette.muted)
+                Spacer(minLength: 4)
+                Button { showingFilter = true } label: {
+                    Image(systemName: filtering ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                        .foregroundStyle(filtering ? TerminalPalette.blue : TerminalPalette.text)
+                }
+                .buttonStyle(HitAreaButtonStyle(compact: true)).help("按任务筛选日志 · 也可输入 /filter #1")
+                .accessibilityLabel("按任务筛选日志")
+                .popover(isPresented: $showingFilter) {
+                    LogFilterPopover(store: store, date: date, selection: $interaction.logFilter)
+                }
+                Button { showingHelp = true } label: { Image(systemName: "questionmark") }
+                    .buttonStyle(HitAreaButtonStyle(compact: true)).help("日志命令")
+                    .popover(isPresented: $showingHelp) { commandHelp }
+            }
+            if filtering { filterBar }
+            stream
+            input
+        }
+        .overlay {
+            if dropTargeted {
+                RoundedRectangle(cornerRadius: 8).strokeBorder(TerminalPalette.blue, style: StrokeStyle(lineWidth: 2, dash: [6]))
+                    .background(TerminalPalette.blue.opacity(0.08)).allowsHitTesting(false)
+                    .overlay(Text("松开以添加图片").foregroundStyle(TerminalPalette.blue))
+            }
+        }
+        .onDrop(of: [UTType.fileURL], isTargeted: $dropTargeted) { providers in
+            guard !store.isReadOnly else { return false }
+            for provider in providers {
+                _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                    guard let url, ImageTools.isImageFile(url), let data = try? Data(contentsOf: url) else { return }
+                    Task { @MainActor in addImages([data]) }
+                }
+            }
+            return true
+        }
+    }
+
+    private func addImages(_ datas: [Data]) {
+        guard !store.isReadOnly else { return }
+        for name in ImageTools.save(datas, in: store) { store.addDraftImage(name, on: date) }
+        focused = true
+    }
+
+    private var editingLog: DailyLogEntry? { editingLogID.flatMap { id in store.entry(for: editingLogDate).logs.first { $0.id == id } } }
+
+    /// 右侧：每日复盘，常驻显示，单击即可编辑。点日志行的铅笔时，临时变成这条日志的编辑框。
+    private var reviewColumn: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                if let log = editingLog {
+                    Image(systemName: "pencil").foregroundStyle(TerminalPalette.blue)
+                    Text("编辑记录").font(.system(size: UIScale.pt(12), weight: .semibold))
+                    Text(Self.time(log.createdAt)).font(.system(size: UIScale.pt(11), design: .monospaced)).foregroundStyle(TerminalPalette.muted)
+                    Spacer(minLength: 4)
+                    Button("取消") { cancelLogEdit() }
+                        .buttonStyle(HitAreaButtonStyle(compact: true)).font(.system(size: UIScale.pt(12)))
+                        .help("取消编辑 · Esc")
+                    Button("保存") { saveLogEdit() }
+                        .buttonStyle(HitAreaButtonStyle(compact: true)).font(.system(size: UIScale.pt(12), weight: .semibold))
+                        .foregroundStyle(TerminalPalette.blue).help("保存 · Enter")
+                } else {
+                    Image(systemName: "doc.text").foregroundStyle(TerminalPalette.amber)
+                    Text("复盘").font(.system(size: UIScale.pt(12), weight: .semibold))
+                    Spacer(minLength: 4)
+                    Button { openReview() } label: { Image(systemName: "text.badge.plus") }
+                        .buttonStyle(HitAreaButtonStyle(compact: true)).help("按进展、卡点、明日计划整理复盘草稿")
+                        .accessibilityLabel("整理复盘草稿")
+                }
+                if let collapse {
+                    Button(action: collapse) { Image(systemName: "chevron.down") }
+                        .buttonStyle(HitAreaButtonStyle()).help("收起终端 · ⌘J").accessibilityLabel("收起终端")
+                }
+            }
+            if let log = editingLog {
+                taskPicker(for: log)
+                LogTextEditor(text: $editText, commit: saveLogEdit, cancel: cancelLogEdit)
+                    .id(log.id)
+                    .padding(.horizontal, 4)
+                    .background(TerminalPalette.surface)
+                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(TerminalPalette.blue.opacity(0.6)))
+                    .accessibilityLabel("编辑日志文字")
+                Text(editHint(for: log)).font(.system(size: UIScale.pt(11))).foregroundStyle(TerminalPalette.muted)
+            } else {
+                SummaryEditor(text: Binding(get: { entry.summary }, set: { store.setSummary($0, on: date) }), readOnly: store.isReadOnly)
+                    .padding(.horizontal, 4)
+                    .background(TerminalPalette.surface)
+                    .overlay(alignment: .topLeading) {
+                        if entry.summary.isEmpty {
+                            Text("单击这里写今天的复盘，\n或点右上角按钮，按进展、卡点、明日计划自动整理。")
+                                .font(.system(size: UIScale.pt(12))).foregroundStyle(TerminalPalette.muted)
+                                .padding(10).allowsHitTesting(false)
+                        }
+                    }
+                    .accessibilityLabel("每日复盘，包含原有总结")
+            }
+        }
+        .padding(.leading, 10)
+        .onReceive(NotificationCenter.default.publisher(for: .dayleafCommitEditing)) { _ in saveLogEdit() }
+        .onDisappear { saveLogEdit() }
+    }
+
+    /// 给这条日志（包括历史日志）选择或更换关联的任务。
+    private func taskPicker(for log: DailyLogEntry) -> some View {
+        let logDate = editingLogDate
+        return Menu {
+            Button("不关联任务") { store.setLogTask(nil, forLog: log.id, on: logDate) }
+            Divider()
+            ForEach(store.sortedTasks().filter { !$0.task.completed || $0.id == log.taskID }) { item in
+                Button(LogTaskLabel.current(item, store: store, logDate: logDate)) {
+                    store.setLogTask(item.id, forLog: log.id, on: logDate)
+                }
+            }
+        } label: {
+            Label(LogTaskLabel.saved(log, store: store, logDate: logDate).map { "关联：" + $0 } ?? "关联任务…", systemImage: "link")
+                .font(.system(size: UIScale.pt(11))).lineLimit(1)
+                .foregroundStyle(log.taskID == nil ? TerminalPalette.muted : TerminalPalette.blue)
+        }
+        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .help("给这条日志打上任务标签；之后可以按任务筛选")
+    }
+
+    private func editHint(for log: DailyLogEntry) -> String {
+        var hint = "Enter 保存 · ⇧Enter 换行 · Esc 取消"
+        if !log.images.isEmpty { hint += " · 含 \(log.images.count) 张图片，不受影响" }
+        else { hint += " · 清空后保存会删除这条记录，可撤销" }
+        return hint
+    }
+
+    private static func time(_ date: Date) -> String {
+        let parts = JournalDates.calendar.dateComponents([.hour, .minute, .second], from: date)
+        return String(format: "[%02d:%02d:%02d]", parts.hour ?? 0, parts.minute ?? 0, parts.second ?? 0)
+    }
+
+    private func beginLogEdit(_ log: DailyLogEntry, on logDate: Date) {
+        guard !store.isReadOnly else { return }
+        // 不能在这里广播「提交编辑」：复盘区自己也监听它，会把刚打开的编辑框立刻保存并关闭。
+        saveLogEdit()
+        interaction.activePane = .summary
+        editText = log.text
+        editingLogDate = logDate
+        editingLogID = log.id
+    }
+
+    private func saveLogEdit() {
+        guard let id = editingLogID else { return }
+        editingLogID = nil
+        store.updateLog(id, text: editText, on: editingLogDate)
+        focused = true
+    }
+
+    private func cancelLogEdit() {
+        editingLogID = nil
+        focused = true
+    }
+
+    private func divider(total: CGFloat) -> some View {
+        Rectangle().fill(Color.white.opacity(0.12)).frame(width: 1)
+            .frame(width: 9).contentShape(Rectangle())
+            .onHover { inside in
+                if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+            }
+            .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("logSplit")).onChanged { value in
+                split = min(max(value.location.x / max(total, 1), 0.3), 0.8)
+            })
+            .help("拖动调整日志与复盘的宽度")
+            .accessibilityLabel("日志与复盘分隔线")
+    }
+
+    private var filtering: Bool { !interaction.logFilter.isEmpty }
+    private var filteredLogs: [JournalStore.LoggedLog] { store.logs(linkedTo: interaction.logFilter) }
+
+    /// 筛选条：显示当前筛选的任务，可逐个移除或清除。
+    private var filterBar: some View {
+        let summaries = store.logTaskSummaries(on: date).filter { interaction.logFilter.contains($0.id) }
+        return HStack(spacing: 6) {
+            Image(systemName: "line.3.horizontal.decrease.circle.fill").foregroundStyle(TerminalPalette.blue)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 5) {
+                    ForEach(summaries) { task in
+                        Button { interaction.logFilter.remove(task.id) } label: {
+                            HStack(spacing: 4) {
+                                Text(task.number.map { "#\($0) " } ?? "").foregroundStyle(TerminalPalette.blue)
+                                Text(task.title).lineLimit(1)
+                                Image(systemName: "xmark").font(.system(size: 8, weight: .bold))
+                            }
+                            .font(.system(size: UIScale.pt(11)))
+                            .padding(.horizontal, 7).frame(height: 22)
+                            .background(TerminalPalette.blue.opacity(0.16), in: Capsule())
+                        }
+                        .buttonStyle(.plain).help("移除这个筛选条件").accessibilityLabel("移除筛选：\(task.title)")
+                    }
+                }
+            }
+            Spacer(minLength: 0)
+            Button("清除筛选") { interaction.logFilter = [] }
+                .buttonStyle(HitAreaButtonStyle(compact: true)).font(.system(size: UIScale.pt(11))).foregroundStyle(TerminalPalette.blue)
+        }
+    }
+
+    @ViewBuilder
+    private var stream: some View {
+        if filtering { filteredStream } else { dayStream }
+    }
+
+    /// 筛选模式：跨日期显示所选任务相关的全部日志，按日期分组。
+    private var filteredStream: some View {
+        let logs = filteredLogs
+        let groups = Dictionary(grouping: logs, by: \.key).sorted { $0.key < $1.key }
+        return ScrollView {
+            LazyVStack(alignment: .leading, spacing: 0) {
+                if logs.isEmpty {
+                    Text("所选任务还没有笔记。输入 /link #1 或 /done #1 内容，即可把日志记到任务名下。")
+                        .font(.system(size: UIScale.pt(12))).foregroundStyle(TerminalPalette.muted).padding(10)
+                }
+                ForEach(groups, id: \.key) { group in
+                    Text("── \(group.key) ──").font(.system(size: UIScale.pt(11), design: .monospaced))
+                        .foregroundStyle(TerminalPalette.muted).padding(.top, 8).padding(.bottom, 2)
+                    ForEach(group.value) { item in
+                        DailyLogRow(store: store, date: item.date, log: item.log, highlighted: editingLogID == item.log.id, next: { focused = true },
+                                    edit: { beginLogEdit($0, on: $1) },
+                                    preview: { previewing = ImagePreviewItem(names: item.log.images, index: $0) })
+                    }
+                }
+            }.padding(.horizontal, 4).padding(.vertical, 5)
+        }
+        .background(TerminalPalette.surface)
+    }
+
+    private var dayStream: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(entry.logs) { log in
+                        DailyLogRow(store: store, date: date, log: log, highlighted: editingLogID == log.id, next: { focused = true },
+                                    edit: { beginLogEdit($0, on: $1) },
+                                    preview: { previewing = ImagePreviewItem(names: log.images, index: $0) })
+                    }
+                    Color.clear.frame(height: 1).id("tail")
+                }.padding(.horizontal, 4).padding(.vertical, 5)
+            }
+            .background(TerminalPalette.surface)
+            .onAppear { proxy.scrollTo("tail", anchor: .bottom) }
+            .onChange(of: entry.logs.last?.id) { _ in if focused { proxy.scrollTo("tail", anchor: .bottom) } }
+        }
+    }
+
+    private var input: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if let error { Text(error).font(.system(size: UIScale.pt(10), design: .monospaced)).foregroundStyle(TerminalPalette.amber) }
+            if !completions.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 2) {
+                        ForEach(completions, id: \.self) { command in
+                            Button(command) { store.setLogDraft(command + " ", on: date); focused = true }
+                                .font(.system(size: UIScale.pt(10), design: .monospaced)).buttonStyle(HitAreaButtonStyle(compact: true))
+                        }
+                    }
+                }
+            }
+            if !entry.logDraftImages.isEmpty {
+                PendingImagesStrip(store: store, names: entry.logDraftImages,
+                                   remove: { store.removeDraftImage($0, on: date) },
+                                   preview: { previewing = ImagePreviewItem(names: entry.logDraftImages, index: $0) })
+            }
+            if let selected = entry.logTaskID {
+                HStack(spacing: 4) {
+                    Image(systemName: "link")
+                    Text(store.locate(selected).map { "关联：" + LogTaskLabel.current($0, store: store, logDate: date) } ?? "关联任务已删除，请重新选择")
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Button { store.setLogTask(nil, on: date) } label: { Image(systemName: "xmark") }
+                        .buttonStyle(HitAreaButtonStyle(compact: true)).disabled(store.isReadOnly)
+                }.font(.system(size: UIScale.pt(10))).foregroundStyle(TerminalPalette.muted)
+            }
+            if entry.logTaskID == nil, let task = store.focusTask {
+                HStack(spacing: 4) {
+                    Image(systemName: "timer")
+                    Text("专注中：日志会关联到 \(FocusHint.label(task))").lineLimit(1)
+                    Spacer(minLength: 0)
+                }.font(.system(size: UIScale.pt(10))).foregroundStyle(TerminalPalette.green)
+            }
+            HStack(spacing: 5) {
+                Text("❯").font(.system(size: UIScale.pt(15), weight: .semibold, design: .monospaced))
+                    .foregroundStyle(TerminalPalette.green)
+                TaskInput(text: draft, focused: $focused, placeholder: "记录…  输入 / 查看命令，⌘V 粘贴图片", fontSize: 12, submit: submit,
+                          monospaced: true, historyUp: historyUp, historyDown: historyDown, complete: completeCommand,
+                          onPasteImages: addImages)
+                    .frame(height: 24).disabled(store.isReadOnly)
+                    .accessibilityLabel("日志命令输入，回车提交")
+                    .onChange(of: focused) { if $0 { interaction.activePane = .summary } }
+                taskMenu
+                Button(action: submit) { Image(systemName: "arrow.turn.down.left") }
+                    .buttonStyle(HitAreaButtonStyle(compact: true)).help("提交日志")
+                    .disabled(store.isReadOnly || (entry.logDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && entry.logDraftImages.isEmpty))
+            }.padding(.horizontal, 6).padding(.vertical, 3).background(TerminalPalette.surface)
+        }
+    }
+
+    private var taskMenu: some View {
+        Menu {
+            Button("不关联任务") { store.setLogTask(nil, on: date) }
+            ForEach(store.sortedTasks().filter { !$0.task.completed }) { item in
+                Button(LogTaskLabel.current(item, store: store, logDate: date)) { store.setLogTask(item.id, on: date); focused = true }
+            }
+        } label: {
+            Label("关联任务", systemImage: "link")
+                .font(.system(size: UIScale.pt(11))).padding(.horizontal, 5).frame(height: 26).contentShape(Rectangle())
+        }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+            .disabled(store.isReadOnly).help("选择任务编号，下一条日志会显示对应任务；/done 同时完成任务")
+    }
+
+    private var commandHelp: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("日志命令").font(.headline)
+            ForEach(DailyLogKind.allCases) { kind in
+                HStack {
+                    Text("/\(kind.rawValue)").font(.system(size: UIScale.pt(12), design: .monospaced)).frame(width: 84, alignment: .leading)
+                    Text(kind.title)
+                }
+            }
+            Text("/link #1   关联任务 #1（之后的日志都记在它名下）\n/unlink    取消关联\n/filter #1 #3  只看这些任务的日志\n/filter    清除筛选\n/summary   整理复盘\n/help      显示命令")
+                .font(.system(size: UIScale.pt(12), design: .monospaced))
+            Text("普通文字直接记录。↑ ↓ 调取历史，Tab 补全命令。\n#编号是任务的永久编号（显示在任务行左边）。命令里可直接写：/done #1 完成了方法部分，或 #2 卡在配置，只关联这一条。\n/done 关联任务后同时勾选完成。")
+                .font(.caption).foregroundStyle(Palette.muted)
+        }.padding(18)
+    }
+
+    private func submit() {
+        guard !store.isReadOnly, !entry.logDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !entry.logDraftImages.isEmpty else { return }
+        do {
+            let command = try store.commitLog(on: date)
+            error = nil
+            historyIndex = nil
+            switch command {
+            case .entry:
+                focused = true
+                ImageIndexer.run(store: store)
+            case .help: store.setLogDraft("", on: date); showingHelp = true
+            case .summary: store.setLogDraft("", on: date); openReview()
+            case .link: focused = true
+            case .filter(let numbers): applyFilter(numbers)
+            }
+        } catch { self.error = error.localizedDescription }
+    }
+
+    /// `/filter #1 #3` 按任务编号筛选；`/filter` 清除。
+    private func applyFilter(_ numbers: [Int]) {
+        let located = numbers.map { ($0, store.locate(number: $0)) }
+        if let missing = located.first(where: { $0.1 == nil }) {
+            error = LogInputError.unknownTask(missing.0).localizedDescription
+            return
+        }
+        store.setLogDraft("", on: date)
+        interaction.logFilter = Set(located.compactMap { $0.1?.id })
+        focused = true
+    }
+
+    private func openReview() {
+        NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+        interaction.activePane = .summary
+        preparingReview = true
+    }
+
+    private func completeCommand() {
+        if let command = completions.first { store.setLogDraft(command + " ", on: date) }
+    }
+
+    private func historyUp() {
+        guard !entry.logs.isEmpty else { return }
+        if historyIndex == nil { pendingDraft = entry.logDraft; pendingTaskID = entry.logTaskID }
+        let index = max(0, min((historyIndex ?? entry.logs.count) - 1, entry.logs.count - 1))
+        historyIndex = index
+        recall(entry.logs[index])
+    }
+
+    private func historyDown() {
+        guard let index = historyIndex else { return }
+        if index + 1 < entry.logs.count {
+            historyIndex = index + 1
+            recall(entry.logs[index + 1])
+        } else {
+            historyIndex = nil
+            store.setLogDraft(pendingDraft, on: date)
+            store.setLogTask(pendingTaskID, on: date)
+        }
+    }
+
+    private func recall(_ log: DailyLogEntry) {
+        store.setLogDraft(log.command, on: date)
+        store.setLogTask(log.taskID.flatMap { store.locate($0)?.id }, on: date)
+    }
+}
+
+private struct DailyLogRow: View {
+    @ObservedObject var store: JournalStore
+    let date: Date
+    let log: DailyLogEntry
+    let highlighted: Bool
+    let next: () -> Void
+    let edit: (DailyLogEntry, Date) -> Void
+    let preview: (Int) -> Void
+    @State private var expanded = false
+    @EnvironmentObject private var interaction: WorkspaceInteraction
+    @State private var editing = false
+    @State private var editText = ""
+    @State private var focused = false
+    @State private var hovered = false
+
+    private var color: Color {
+        switch log.kind {
+        case .note: return TerminalPalette.muted
+        case .done: return TerminalPalette.green
+        case .block: return TerminalPalette.amber
+        case .plan: return TerminalPalette.blue
+        }
+    }
+
+    private var timestamp: String {
+        let parts = JournalDates.calendar.dateComponents([.hour, .minute, .second], from: log.createdAt)
+        return String(format: "[%02d:%02d:%02d]", parts.hour!, parts.minute!, parts.second!)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            line
+            if expanded, !log.images.isEmpty {
+                LogImageGallery(store: store, names: log.images, preview: preview)
+                    .transition(Motion.reduced ? .identity : .opacity)
+            }
+        }
+        .animation(Motion.quick, value: expanded)
+    }
+
+    private func toggleImages() {
+        guard !log.images.isEmpty else { return }
+        expanded.toggle()
+    }
+
+    private var line: some View {
+        HStack(alignment: .top, spacing: 3) {
+            Text(timestamp).foregroundStyle(color)
+                .font(.system(size: UIScale.pt(11), design: .monospaced)).padding(.top, 1)
+                .fixedSize()
+                .help("\(log.kind.title) · \(log.createdAt.formatted(date: .abbreviated, time: .standard))")
+            if let label = LogTaskLabel.saved(log, store: store, logDate: date) {
+                Button {
+                    if let id = log.taskID, let task = store.locate(id) {
+                        interaction.selectedTaskID = id
+                        if let due = task.task.dueDate { NotificationCenter.default.post(name: .dayleafNavigate, object: due) }
+                    }
+                } label: {
+                    Text("[\(label)]").font(.system(size: UIScale.pt(11), design: .monospaced)).lineLimit(1)
+                        .padding(.horizontal, 3).frame(height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).foregroundStyle(TerminalPalette.blue)
+                .frame(maxWidth: 220, alignment: .leading).fixedSize(horizontal: true, vertical: false)
+                .help(label).accessibilityLabel("关联任务：\(label)")
+                .disabled(log.taskID.flatMap { store.locate($0) } == nil)
+            }
+            Group {
+                if editing {
+                    TaskInput(text: $editText, focused: $focused, fontSize: 12,
+                              submit: { finishEditing(); next() }, cancel: finishEditing, monospaced: true)
+                        .frame(height: 20).onAppear { focused = true }
+                        .onChange(of: focused) { if !$0, !LinkInsertion.presenting { finishEditing() } }
+                } else if log.text.isEmpty, !log.images.isEmpty {
+                    Button(action: toggleImages) {
+                        Text(expanded ? "收起图片" : "图片 · 点击查看")
+                            .font(.system(size: UIScale.pt(12), design: .monospaced)).foregroundStyle(TerminalPalette.muted)
+                            .frame(maxWidth: .infinity, minHeight: 20, alignment: .leading).contentShape(Rectangle())
+                    }.buttonStyle(.plain)
+                } else {
+                    TaskLinkText(source: log.text, completed: false, color: TerminalPalette.text, fontSize: 12,
+                                 edit: startEditing, open: SafariLinks.open,
+                                 maxLines: 0, monospaced: true, compactLines: true,
+                                 click: log.images.isEmpty ? nil : toggleImages)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            if !log.images.isEmpty {
+                Button(action: toggleImages) {
+                    Label("\(log.images.count)", systemImage: expanded ? "photo.fill" : "photo")
+                        .font(.system(size: UIScale.pt(11), design: .monospaced))
+                        .padding(.horizontal, 5).frame(height: 22).contentShape(Rectangle())
+                }
+                .buttonStyle(.plain).foregroundStyle(TerminalPalette.blue)
+                .help(expanded ? "收起图片" : "点击查看 \(log.images.count) 张图片")
+                .accessibilityLabel(expanded ? "收起图片" : "查看 \(log.images.count) 张图片")
+            }
+            HStack(spacing: 0) {
+                ItemActionButton(symbol: "pencil", title: "在右侧编辑这条记录", compact: true) { edit(log, date) }
+                ItemActionButton(symbol: "trash", title: "删除记录 · 可撤销", destructive: true, compact: true, action: delete)
+                    .allowsHitTesting(hovered || editing)
+            }
+            .fixedSize()
+            .opacity(hovered || editing ? 1 : 0.18)
+            .disabled(store.isReadOnly)
+        }
+        .frame(minHeight: 22, alignment: .top)
+        .background(highlighted ? TerminalPalette.blue.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 3))
+        .contentShape(Rectangle())
+        .onContinuousHover { phase in
+            switch phase {
+            case .active: hovered = true
+            case .ended: hovered = false
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .dayleafCommitEditing)) { _ in finishEditing() }
+        .onDisappear { finishEditing() }
+    }
+
+    private func startEditing() {
+        interaction.activePane = .summary
+        guard !store.isReadOnly else { return }
+        NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+        editText = log.text
+        editing = true
+    }
+
+    private func finishEditing() {
+        guard editing else { return }
+        editing = false
+        store.updateLog(log.id, text: editText, on: date)
+    }
+
+    private func delete() {
+        guard !store.isReadOnly else { return }
+        finishEditing()
+        store.deleteLog(log.id, on: date)
+    }
+}
+
+private struct ReviewDraftView: View {
+    @ObservedObject var store: JournalStore
+    let date: Date
+    @Environment(\.dismiss) private var dismiss
+    @State private var text: String
+    @State private var append = true
+
+    init(store: JournalStore, date: Date) {
+        self.store = store
+        self.date = date
+        _text = State(initialValue: DailyReview.render(store.entry(for: date)))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("复盘草稿").font(.headline)
+            SummaryEditor(text: $text, readOnly: store.isReadOnly, startsEditing: true)
+            if !store.entry(for: date).summary.isEmpty {
+                Picker("保存方式", selection: $append) {
+                    Text("追加到已有总结").tag(true)
+                    Text("替换已有总结").tag(false)
+                }.pickerStyle(.segmented)
+            }
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("保存复盘") { store.applyReview(text, on: date, append: append); dismiss() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(store.isReadOnly || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }.padding(20).frame(width: 540, height: 420)
+    }
+}
