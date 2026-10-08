@@ -73,8 +73,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         focusPanel = FocusPanelController(session: focus)
         loginItem = LoginItem()
         settings = SettingsWindowController(loginItem: loginItem, failedHotKeys: { [weak self] in self?.failedHotKeys })
-        shell.handoffWindow = { [unowned self] in otherWindowForHandoff(excludingNotes: false) }
-        NotesWindowController.shared.handoffWindow = { [unowned self] in otherWindowForHandoff(excludingNotes: true) }
+        shell.handoffWindow = { [unowned self] in otherWindowForHandoff(excluding: nil) }
+        NotesWindowController.shared.handoffWindow = { [unowned self] in otherWindowForHandoff(excluding: NotesWindowController.shared.window) }
+        let dayLog = DayLogWindowController.shared
+        dayLog.interaction = interaction
+        dayLog.toast = toast
+        dayLog.handoffWindow = { [unowned self] in otherWindowForHandoff(excluding: DayLogWindowController.shared.window) }
+        dayLog.showMainWindow = { [unowned self] in showMainWindowSoftly() }
         quickCapture = QuickCaptureController(store: store, openMain: { [weak self] in self?.showMainWindow() },
                                               openShell: { [weak self] in self?.shell.show() })
         UserDefaults.standard.register(defaults: [Prefs.clickExpands: true, Prefs.globalHotKey: true, Prefs.uiScale: 1.0])
@@ -191,7 +196,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let self else { return }
             window.orderOut(nil)
             WindowFade.reset(window)
-            PreviousApp.restore(handoff: shell.visibleWindow ?? visibleNotesWindow)
+            PreviousApp.restore(handoff: otherWindowForHandoff(excluding: window))
         }
         if Motion.reduced { finish() } else { fadeWindow(to: 0, duration: 0.14, completion: finish) }
     }
@@ -201,9 +206,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     /// 一组窗口收起后，焦点可以交给的 Scheduler 别的可见窗口：主窗口、笔记、终端各自独立，谁还开着就交给谁。
-    private func otherWindowForHandoff(excludingNotes: Bool) -> NSWindow? {
-        if window.isVisible, !window.isMiniaturized { return window }
-        return (excludingNotes ? nil : visibleNotesWindow) ?? shell.visibleWindow
+    private func otherWindowForHandoff(excluding: NSWindow?) -> NSWindow? {
+        let candidates: [NSWindow?] = [window, visibleNotesWindow, DayLogWindowController.shared.window]
+        for case let candidate? in candidates where candidate !== excluding && candidate.isVisible && !candidate.isMiniaturized { return candidate }
+        return shell.visibleWindow
     }
 
     private func fadeWindow(to alpha: CGFloat, duration: TimeInterval, completion: (() -> Void)? = nil) {

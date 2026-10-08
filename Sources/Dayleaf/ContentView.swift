@@ -60,8 +60,7 @@ struct ContentView: View {
     @State private var currentDayKey = JournalDates.key(Date())
     @State private var addingTodo = false
     @AppStorage("tasksPaneExpanded") private var tasksVisible = false
-    /// ⌘J 打开的当天日志 sheet。
-    @State private var showingDayLog = false
+    private let dayLogWindow = DayLogWindowController.shared
     private let dayTimer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
     private var entry: DayEntry { store.entry(for: selectedDate) }
     /// 全部任务（不属于某一天），按截止时间排序；隐藏已完成时过滤掉已完成的。
@@ -114,14 +113,11 @@ struct ContentView: View {
                 reveal(date: date, taskID: id)
                 // 点中的是某天的日志或总结（不是待办）：关掉搜索后打开那天的日志。
                 if id == nil, date != nil {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { showingDayLog = true }
+                    dayLogWindow.show(store: store, date: date ?? selectedDate)
                 }
             }, filter: filter)
         }
         .sheet(isPresented: $showingBackups) { BackupRestoreView(store: store) }
-        .sheet(isPresented: $showingDayLog) {
-            DayLogSheet(store: store, initialDate: selectedDate, close: { showingDayLog = false })
-        }
         .alert("暂时无法完成操作", isPresented: Binding(
             get: { actionError != nil || loginItem.errorMessage != nil },
             set: { if !$0 { actionError = nil; loginItem.errorMessage = nil } }
@@ -165,7 +161,7 @@ struct ContentView: View {
         let selected = interaction.selectedTaskID
         notesWindow.show(store: store, taskID: store.noteTopics().contains { $0.id == selected } ? selected : nil, tag: tag,
                          reveal: { id in reveal(date: store.locate(id)?.task.dueDate, taskID: id) },
-                         openDay: { date in select(date); showingDayLog = true })
+                         openDay: { date in select(date); dayLogWindow.show(store: store, date: date) })
     }
 
     private func handle(_ command: AppCommand) {
@@ -176,8 +172,7 @@ struct ContentView: View {
             addingTodo = true
         case .newLog:
             // 写日志：打开当天日志，光标直接在输入框里。
-            NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
-            showingDayLog = true
+            dayLogWindow.show(store: store, date: selectedDate)
         case .insertLink:
             guard !store.isReadOnly else { return }
             linkInsertion = LinkInsertion()
@@ -196,8 +191,7 @@ struct ContentView: View {
         case .shiftMonth(let amount): shiftMonth(amount)
         case .toggleTasks: toggleTasks()
         case .toggleDayLog:
-            NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
-            showingDayLog.toggle()
+            dayLogWindow.toggle(store: store, date: selectedDate)
         case .rollover: rolloverToday()
         case .selectAdjacent(let amount): moveSelection(amount)
         case .toggleSelected:
@@ -318,7 +312,7 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 navigationButton("chevron.left", help: "前一天 · ⌥⌘←") { shiftDay(-1) }
                 navigationButton("chevron.right", help: "后一天 · ⌥⌘→") { shiftDay(1) }
-                navigationButton("text.alignleft", help: "当天日志 · ⌘J") { showingDayLog = true }
+                navigationButton("text.alignleft", help: "当天日志 · ⌘J") { dayLogWindow.show(store: store, date: selectedDate) }
                 navigationButton("sidebar.left", help: "收起待办清单 · ⌘\\") { toggleTasks() }
             }
         }
