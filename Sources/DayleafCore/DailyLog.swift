@@ -21,6 +21,11 @@ public enum DailyLogKind: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+extension DayEntry {
+    /// 当天的日志按记录时间从早到晚（补记、导入的日志不一定是按时间追加的）。
+    public var logsInTimeOrder: [DailyLogEntry] { logs.sorted { $0.createdAt < $1.createdAt } }
+}
+
 public struct DailyLogEntry: Codable, Equatable, Identifiable {
     public var id: UUID
     public var createdAt: Date

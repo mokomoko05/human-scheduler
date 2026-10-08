@@ -457,7 +457,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
         let file = submenu("文件", [
             menuItem("新建待办", send(.newTodo)),
-            menuItem("写日志", key: "l", send(.newLog)),
+            menuItem("写日志…", key: "l", send(.newLog)),
             menuItem("快速添加待办…") { [weak self] in self?.quickCapture.toggle(.todo) },
             menuItem("快速写日志…") { [weak self] in self?.quickCapture.toggle(.log) },
             menuItem("插入链接…", send(.insertLink)),
@@ -536,7 +536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             menuItem("已逾期…", send(.agenda(.overdue))),
             .separator(),
             menuItem("显示 / 隐藏待办清单", key: "\\", send(.toggleTasks)),
-            menuItem("显示 / 隐藏终端", key: "j", send(.toggleTerminal)),
+            menuItem("当天日志（开 / 关）", key: "j", send(.toggleDayLog)),
             menuItem("隐藏已完成", key: "h", modifiers: [.command, .shift], toggle: (Prefs.hideCompleted, false)),
             menuItem("单击日期时展开待办清单", toggle: (Prefs.clickExpands, true)),
         ])

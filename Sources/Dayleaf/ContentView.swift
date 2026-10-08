@@ -60,15 +60,12 @@ struct ContentView: View {
     @State private var currentDayKey = JournalDates.key(Date())
     @State private var addingTodo = false
     @AppStorage("tasksPaneExpanded") private var tasksVisible = false
-    @AppStorage("terminalPaneExpanded") private var terminalVisible = true
+    /// ⌘J 打开的当天日志 sheet。
+    @State private var showingDayLog = false
     private let dayTimer = Timer.publish(every: 30, on: .main, in: .common).autoconnect()
     private var entry: DayEntry { store.entry(for: selectedDate) }
     /// 全部任务（不属于某一天），按截止时间排序；隐藏已完成时过滤掉已完成的。
     private var visibleTasks: [ScheduledTask] { store.sortedTasks().filter { !hideCompleted || !$0.task.completed } }
-    /// 终端只对今天及以前的日期开放；未来的日期不显示。
-    private var terminalAvailable: Bool {
-        selectedDate <= JournalDates.calendar.startOfDay(for: Date())
-    }
     private var weekStart: Int { weekStartsSunday ? 1 : 2 }
     private var footerVisible: Bool { store.errorMessage != nil || !reminders.status.isEmpty }
     private var draft: Binding<String> {
@@ -80,17 +77,13 @@ struct ContentView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ResizableWorkspace(tasksVisible: $tasksVisible, terminalVisible: $terminalVisible, terminalAvailable: terminalAvailable) {
+            ResizableWorkspace(tasksVisible: $tasksVisible) {
                 VStack(alignment: .leading, spacing: 16) {
                     dateHeader
                     todoCard
                 }
                 .padding(16)
                 .simultaneousGesture(TapGesture().onEnded { interaction.activePane = .tasks })
-            } summary: {
-                summaryCard.padding(16)
-                    .background(TerminalPalette.panel)
-                    .simultaneousGesture(TapGesture().onEnded { interaction.activePane = .summary })
             } calendar: {
                 calendarCard.padding(16)
             }
@@ -117,9 +110,18 @@ struct ContentView: View {
             LinkComposer(insert: { pendingLink = $0 }, initialAddress: linkInsertion?.initialAddress ?? "", initialLabel: linkInsertion?.initialLabel ?? "")
         }
         .sheet(item: $agenda) { filter in
-            AgendaView(store: store, navigate: { date, id in reveal(date: date, taskID: id) }, filter: filter)
+            AgendaView(store: store, navigate: { date, id in
+                reveal(date: date, taskID: id)
+                // 点中的是某天的日志或总结（不是待办）：关掉搜索后打开那天的日志。
+                if id == nil, date != nil {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { showingDayLog = true }
+                }
+            }, filter: filter)
         }
         .sheet(isPresented: $showingBackups) { BackupRestoreView(store: store) }
+        .sheet(isPresented: $showingDayLog) {
+            DayLogSheet(store: store, initialDate: selectedDate, close: { showingDayLog = false })
+        }
         .alert("暂时无法完成操作", isPresented: Binding(
             get: { actionError != nil || loginItem.errorMessage != nil },
             set: { if !$0 { actionError = nil; loginItem.errorMessage = nil } }
@@ -163,7 +165,7 @@ struct ContentView: View {
         let selected = interaction.selectedTaskID
         notesWindow.show(store: store, taskID: store.noteTopics().contains { $0.id == selected } ? selected : nil, tag: tag,
                          reveal: { id in reveal(date: store.locate(id)?.task.dueDate, taskID: id) },
-                         openDay: { select($0) })
+                         openDay: { date in select(date); showingDayLog = true })
     }
 
     private func handle(_ command: AppCommand) {
@@ -173,10 +175,9 @@ struct ContentView: View {
             interaction.activePane = .tasks
             addingTodo = true
         case .newLog:
-            if !terminalAvailable { select(Date()) }
-            terminalVisible = true
-            interaction.activePane = .summary
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { interaction.logFocusRequest += 1 }
+            // 写日志：打开当天日志，光标直接在输入框里。
+            NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+            showingDayLog = true
         case .insertLink:
             guard !store.isReadOnly else { return }
             linkInsertion = LinkInsertion()
@@ -194,17 +195,9 @@ struct ContentView: View {
         case .shiftDay(let amount): shiftDay(amount)
         case .shiftMonth(let amount): shiftMonth(amount)
         case .toggleTasks: toggleTasks()
-        case .toggleTerminal:
-            guard terminalAvailable else { toast.show("终端只在今天及以前的日期可用"); return }
+        case .toggleDayLog:
             NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
-            // 终端高度变化会让整个月历重新布局，动画会逐帧重算，所以瞬间切换。
-            var transaction = Transaction(animation: nil)
-            transaction.disablesAnimations = true
-            withTransaction(transaction) { terminalVisible.toggle() }
-            if terminalVisible {
-                interaction.activePane = .summary
-                DispatchQueue.main.async { interaction.logFocusRequest += 1 }
-            }
+            showingDayLog.toggle()
         case .rollover: rolloverToday()
         case .selectAdjacent(let amount): moveSelection(amount)
         case .toggleSelected:
@@ -325,6 +318,7 @@ struct ContentView: View {
             HStack(spacing: 12) {
                 navigationButton("chevron.left", help: "前一天 · ⌥⌘←") { shiftDay(-1) }
                 navigationButton("chevron.right", help: "后一天 · ⌥⌘→") { shiftDay(1) }
+                navigationButton("text.alignleft", help: "当天日志 · ⌘J") { showingDayLog = true }
                 navigationButton("sidebar.left", help: "收起待办清单 · ⌘\\") { toggleTasks() }
             }
         }
@@ -505,13 +499,6 @@ struct ContentView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity).contentShape(Rectangle())
-    }
-
-    private var summaryCard: some View {
-        DailyLogView(store: store, date: selectedDate, collapse: {
-            NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
-            terminalVisible = false
-        }).id(JournalDates.key(selectedDate))
     }
 
     // MARK: - 月历

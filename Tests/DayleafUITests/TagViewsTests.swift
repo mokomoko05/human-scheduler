@@ -79,3 +79,33 @@ final class TagViewsTests: XCTestCase {
         }
     }
 }
+
+@MainActor
+final class DayLogSheetTests: XCTestCase {
+    private static var keepAlive: [AnyObject] = []
+
+    func testSheetListsTheDaysLogsInTimeOrderAndRenders() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = JournalStore(directory: directory)
+        let day = JournalDates.calendar.startOfDay(for: Date())
+        _ = try store.quickLog("晚", on: day, now: day.addingTimeInterval(3 * 3600))
+        _ = try store.quickLog("早", on: day, now: day.addingTimeInterval(3600))
+        _ = try store.quickLog("中", on: day, now: day.addingTimeInterval(2 * 3600))
+        XCTAssertEqual(store.entry(for: day).logs.map(\.text), ["晚", "早", "中"], "存储顺序是追加顺序")
+        XCTAssertEqual(store.entry(for: day).logsInTimeOrder.map(\.text), ["早", "中", "晚"], "显示按时间顺序")
+
+        var closed = false
+        let view = DayLogSheet(store: store, initialDate: day, close: { closed = true })
+            .environmentObject(WorkspaceInteraction()).environmentObject(ToastCenter())
+        let host = NSHostingView(rootView: view)
+        let window = QuietWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        Self.keepAlive += [window, host]
+        XCTAssertGreaterThan(host.fittingSize.height, 400, "sheet 有足够的高度")
+        XCTAssertGreaterThanOrEqual(host.fittingSize.width, 820)
+        XCTAssertFalse(closed)
+    }
+}

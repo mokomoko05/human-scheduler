@@ -29,7 +29,7 @@ enum AppCommand {
     case newTodo, newLog, insertLink, today, search
     case shiftDay(Int), shiftMonth(Int)
     case agenda(AgendaFilter)
-    case toggleTasks, toggleTerminal, rollover
+    case toggleTasks, toggleDayLog, rollover
     case selectAdjacent(Int), toggleSelected, editSelected, deleteSelected, deselect
     case reveal(UUID)
     case export, backups, settings, quickCapture, notes, toggleNotes

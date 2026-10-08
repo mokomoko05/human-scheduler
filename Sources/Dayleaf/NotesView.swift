@@ -20,6 +20,9 @@ struct NotesView: View {
     @State private var tagDraftImages: [String] = []
     @State private var tagLink: UUID?
     @State private var tagFocused = false
+    @State private var editingNoteID: UUID?
+    @State private var noteEditText = ""
+    @State private var noteEditFocused = false
     @State private var query = ""
     @State private var previewing: ImagePreviewItem?
     @State private var draft = ""
@@ -353,7 +356,17 @@ struct NotesView: View {
                     }
                     .buttonStyle(.plain).foregroundStyle(Palette.accent).help("查看这个待办的全部笔记")
                 }
-                if !log.text.isEmpty {
+                if editingNoteID == log.id {
+                    VStack(alignment: .leading, spacing: 4) {
+                        TaskInput(text: $noteEditText, focused: $noteEditFocused, fontSize: 13,
+                                  submit: { saveNoteEdit(item) }, cancel: cancelNoteEdit, minHeight: 24, maxLines: 12)
+                            .padding(.horizontal, 8).padding(.vertical, 2)
+                            .background(Palette.card, in: RoundedRectangle(cornerRadius: 6))
+                            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Palette.accent.opacity(0.6)))
+                            .onAppear { noteEditFocused = true }
+                        Text("回车保存 · ⇧回车换行 · Esc 取消 · 清空后保存会删除这条（可撤销）").font(.system(size: 10)).foregroundStyle(Palette.muted)
+                    }
+                } else if !log.text.isEmpty {
                     Text(TaskText.rendered(log.text)).font(.system(size: 13)).textSelection(.enabled)
                         .environment(\.openURL, OpenURLAction { url in SafariLinks.open(url); return .handled })
                 }
@@ -370,15 +383,52 @@ struct NotesView: View {
                 }
             }
             Spacer(minLength: 0)
-            Button { copy(log) } label: {
-                Image(systemName: "doc.on.doc").font(.system(size: 11)).frame(width: 24, height: 22).contentShape(Rectangle())
+            HStack(spacing: 0) {
+                noteAction("doc.on.doc", log.copyText == nil ? "这条只有图片，没有文字可复制" : "复制这条的文字（不含图片）") { copy(log) }
+                    .disabled(log.copyText == nil)
+                if !store.isReadOnly {
+                    noteAction("pencil", "编辑这条笔记") { beginNoteEdit(log) }
+                    LinkPickerButton(store: store, current: log.taskID, pick: { store.setLogTask($0, forLog: log.id, on: item.date) }) {
+                        Image(systemName: "link").font(.system(size: 11)).frame(width: 24, height: 22).contentShape(Rectangle())
+                    }
+                    .foregroundStyle(Palette.muted).help("更换这条笔记关联的待办（章节）").accessibilityLabel("更换关联的待办")
+                    noteAction("trash", "删除这条笔记 · ⌘Z 撤销", destructive: true) { deleteNote(item) }
+                }
             }
-            .buttonStyle(.plain).foregroundStyle(Palette.muted)
-            .disabled(log.copyText == nil)
-            .help(log.copyText == nil ? "这条只有图片，没有文字可复制" : "复制这条的文字（不含图片）")
-            .accessibilityLabel("复制这条笔记的文字")
+            .fixedSize()
         }
         .padding(.vertical, 5)
+    }
+
+    private func noteAction(_ symbol: String, _ help: String, destructive: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol).font(.system(size: 11)).frame(width: 24, height: 22).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).foregroundStyle(destructive ? Palette.deadline : Palette.muted)
+        .help(help).accessibilityLabel(help)
+    }
+
+    private func beginNoteEdit(_ log: DailyLogEntry) {
+        editingNoteID = log.id
+        noteEditText = log.text
+        noteEditFocused = true
+    }
+
+    private func cancelNoteEdit() {
+        editingNoteID = nil
+        noteEditFocused = false
+    }
+
+    private func saveNoteEdit(_ item: JournalStore.LoggedLog) {
+        guard editingNoteID == item.log.id else { return }
+        editingNoteID = nil
+        store.updateLog(item.log.id, text: noteEditText, on: item.date)
+    }
+
+    private func deleteNote(_ item: JournalStore.LoggedLog) {
+        if editingNoteID == item.log.id { editingNoteID = nil }
+        store.deleteLog(item.log.id, on: item.date)
+        error = "已删除这条笔记，⌘Z 可撤销"
     }
 
     private func copy(_ log: DailyLogEntry) {
@@ -510,7 +560,7 @@ struct NotesView: View {
                 Text("专注中：不选待办时，这条会关联到 \(FocusHint.label(focus))").font(.system(size: 11)).foregroundStyle(Palette.muted)
             }
             if let error {
-                Text(error).font(.system(size: 11)).foregroundStyle(error.hasPrefix("已复制") ? Palette.success : Palette.deadline)
+                Text(error).font(.system(size: 11)).foregroundStyle(error.hasPrefix("已") ? Palette.success : Palette.deadline)
             }
         }
         .padding(.horizontal, 20).padding(.vertical, 12)
@@ -574,7 +624,7 @@ struct NotesView: View {
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(Palette.card, in: RoundedRectangle(cornerRadius: 8))
             if let error {
-                Text(error).font(.system(size: 11)).foregroundStyle(error.hasPrefix("已复制") ? Palette.success : Palette.deadline)
+                Text(error).font(.system(size: 11)).foregroundStyle(error.hasPrefix("已") ? Palette.success : Palette.deadline)
             }
         }
         .padding(.horizontal, 20).padding(.vertical, 12)

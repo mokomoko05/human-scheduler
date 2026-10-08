@@ -33,6 +33,8 @@ struct DailyLogView: View {
     @ObservedObject var store: JournalStore
     let date: Date
     var collapse: (() -> Void)?
+    /// 出现时光标直接进输入框（在 sheet 里用）。
+    var autoFocus = false
     @EnvironmentObject private var interaction: WorkspaceInteraction
     @EnvironmentObject private var toast: ToastCenter
     @AppStorage("logReviewSplit") private var split = 0.6
@@ -84,6 +86,7 @@ struct DailyLogView: View {
         .contentShape(Rectangle())
         .simultaneousGesture(TapGesture().onEnded { interaction.activePane = .summary })
         .onChange(of: interaction.logFocusRequest) { _ in focused = true }
+        .onAppear { if autoFocus { DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { focused = true } } }
         .onChange(of: date) { _ in selectedLogs = [] }
         .onChange(of: interaction.logFilter) { _ in selectedLogs = [] }
         .sheet(isPresented: $preparingReview) {
@@ -170,7 +173,7 @@ struct DailyLogView: View {
                 }
                 if let collapse {
                     Button(action: collapse) { Image(systemName: "chevron.down") }
-                        .buttonStyle(HitAreaButtonStyle()).help("收起终端 · ⌘J").accessibilityLabel("收起终端")
+                        .buttonStyle(HitAreaButtonStyle()).help("关闭 · ⌘J").accessibilityLabel("关闭当天日志")
                 }
             }
             if let log = editingLog {
@@ -373,7 +376,7 @@ struct DailyLogView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(entry.logs) { log in
+                    ForEach(entry.logsInTimeOrder) { log in
                         DailyLogRow(store: store, date: date, log: log, highlighted: editingLogID == log.id, next: { focused = true },
                                     selection: selectionState(log.id), copy: { copyLogs([$0.id]) },
                                     edit: { beginLogEdit($0, on: $1) },
@@ -384,7 +387,7 @@ struct DailyLogView: View {
             }
             .background(TerminalPalette.surface)
             .onAppear { proxy.scrollTo("tail", anchor: .bottom) }
-            .onChange(of: entry.logs.last?.id) { _ in if focused { proxy.scrollTo("tail", anchor: .bottom) } }
+            .onChange(of: entry.logs.count) { _ in if focused { proxy.scrollTo("tail", anchor: .bottom) } }
         }
     }
 

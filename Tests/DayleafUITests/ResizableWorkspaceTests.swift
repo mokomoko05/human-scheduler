@@ -3,55 +3,25 @@ import XCTest
 @testable import Dayleaf
 
 final class ResizableWorkspaceTests: XCTestCase {
-    func testTerminalSpansBothUpperPanesAndCalendarAlwaysRemainsVisible() {
+    func testTasksAndCalendarShareTheFullHeightAndCalendarAlwaysRemainsVisible() {
         let size = CGSize(width: 1200, height: 800)
-        let expanded = WorkspaceDimensions(size: size, leftFraction: 0.4, topFraction: 0.6)
+        let expanded = WorkspaceDimensions(size: size, leftFraction: 0.4)
         XCTAssertEqual(expanded.tasksFrame.maxX, expanded.calendarFrame.minX)
-        XCTAssertEqual(expanded.tasksFrame.maxY, expanded.terminalFrame.minY)
-        XCTAssertEqual(expanded.calendarFrame.maxY, expanded.terminalFrame.minY)
-        XCTAssertEqual(expanded.terminalFrame.width, size.width)
-        XCTAssertEqual(expanded.terminalFrame.maxY, size.height)
-        let hiddenTasks = WorkspaceDimensions(size: size, leftFraction: 0.4, topFraction: 0.6, tasksVisible: false)
+        XCTAssertEqual(expanded.tasksFrame.height, size.height, "不再有底部的日志区，清单和月历占满整个高度")
+        XCTAssertEqual(expanded.calendarFrame.height, size.height)
+        let hiddenTasks = WorkspaceDimensions(size: size, leftFraction: 0.4, tasksVisible: false)
         XCTAssertEqual(hiddenTasks.left, 0)
         XCTAssertEqual(hiddenTasks.calendarFrame.width, size.width)
-        XCTAssertEqual(hiddenTasks.terminalFrame.width, size.width)
     }
 
-    func testCollapsedTerminalLeavesOnlyBarAndResizingPreservesCollapsedPanes() {
-        let size = CGSize(width: 1200, height: 800)
-        let folded = WorkspaceDimensions(size: size, leftFraction: 0.4, topFraction: 0.6, tasksVisible: false, terminalVisible: false)
-        XCTAssertEqual(folded.terminalFrame.height, 32)
-        XCTAssertEqual(folded.calendarFrame, CGRect(x: 0, y: 0, width: 1200, height: 768))
-        let moved = folded.moving(CGSize(width: 50, height: -80), axis: .both)
-        XCTAssertEqual(moved.calendarFrame, folded.calendarFrame)
-        let tasksOnly = WorkspaceDimensions(size: size, leftFraction: 0.4, topFraction: 0.6, terminalVisible: false)
-        XCTAssertEqual(tasksOnly.tasksFrame.height, 768)
-        XCTAssertEqual(tasksOnly.moving(CGSize(width: 50, height: -80), axis: .horizontal).left, tasksOnly.left + 50)
-    }
-
-    func testJunctionMovesBothDividersAndEdgesMoveOnlyTheirAxis() {
-        let original = WorkspaceDimensions(size: CGSize(width: 1200, height: 800), leftFraction: 0.4, topFraction: 0.6)
-        let delta = CGSize(width: 70, height: -60)
-        let diagonal = original.moving(delta, axis: .both)
-        XCTAssertEqual(diagonal.left, original.left + 70, accuracy: 0.001)
-        XCTAssertEqual(diagonal.top, original.top - 60, accuracy: 0.001)
-        XCTAssertEqual(original.moving(delta, axis: .horizontal).top, original.top, accuracy: 0.001)
-        XCTAssertEqual(original.moving(delta, axis: .vertical).left, original.left, accuracy: 0.001)
-    }
-
-    func testDraggingToWindowEdgesPreservesUsablePanesAndRatios() {
-        let original = WorkspaceDimensions(size: CGSize(width: 1200, height: 800), leftFraction: 0.4, topFraction: 0.6)
-        let minimum = original.moving(CGSize(width: -2000, height: -2000), axis: .both)
-        XCTAssertEqual(minimum.left, 300)
-        XCTAssertEqual(minimum.top, 240)
-        let maximum = original.moving(CGSize(width: 2000, height: 2000), axis: .both)
-        XCTAssertEqual(maximum.left, 740)
-        XCTAssertEqual(maximum.top, 620)
-        let restored = WorkspaceDimensions(size: maximum.size,
-                                           leftFraction: maximum.left / maximum.size.width,
-                                           topFraction: maximum.top / maximum.size.height)
+    func testDraggingTheDividerKeepsBothPanesUsableAndRatioRoundTrips() {
+        let original = WorkspaceDimensions(size: CGSize(width: 1200, height: 800), leftFraction: 0.4)
+        XCTAssertEqual(original.moving(CGSize(width: 70, height: 0)).left, original.left + 70, accuracy: 0.001)
+        XCTAssertEqual(original.moving(CGSize(width: -2000, height: 0)).left, 300, "清单最窄 300")
+        let maximum = original.moving(CGSize(width: 2000, height: 0))
+        XCTAssertEqual(maximum.left, 740, "月历至少留 460")
+        let restored = WorkspaceDimensions(size: maximum.size, leftFraction: maximum.left / maximum.size.width)
         XCTAssertEqual(restored.left, maximum.left, accuracy: 0.001)
-        XCTAssertEqual(restored.top, maximum.top, accuracy: 0.001)
     }
 
     @MainActor
@@ -78,16 +48,8 @@ final class ResizableWorkspaceTests: XCTestCase {
         XCTAssertEqual(translation, CGSize(width: 80, height: 50))
     }
 
-    func testFutureDatesGiveTheWholeHeightToTasksAndCalendar() {
-        let size = CGSize(width: 1200, height: 800)
-        let layout = WorkspaceDimensions(size: size, leftFraction: 0.4, topFraction: 0.6, terminalAvailable: false)
-        XCTAssertEqual(layout.tasksFrame.height, size.height)
-        XCTAssertEqual(layout.calendarFrame.height, size.height)
-        XCTAssertEqual(layout.terminalFrame.height, 0)
-    }
-
     func testNarrowWindowShowsTasksAloneInsteadOfSqueezingTheCalendar() {
-        let narrow = WorkspaceDimensions(size: CGSize(width: 700, height: 700), leftFraction: 0.4, topFraction: 0.6)
+        let narrow = WorkspaceDimensions(size: CGSize(width: 700, height: 700), leftFraction: 0.4)
         XCTAssertTrue(narrow.narrow)
         XCTAssertEqual(narrow.tasksFrame.width, 700)
         XCTAssertEqual(narrow.calendarFrame.width, 0)
