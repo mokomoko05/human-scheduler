@@ -22,9 +22,9 @@ struct ImageThumb: View {
             }
         }
         .frame(width: size, height: size)
-        .background(Color.white.opacity(0.06))
+        .background(Palette.line.opacity(0.35))
         .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.white.opacity(0.16)))
+        .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Palette.line))
     }
 }
 
@@ -40,7 +40,7 @@ struct ImageFit: View {
             Image(nsImage: image).resizable().interpolation(.high)
                 .frame(width: size.width, height: size.height)
                 .clipShape(RoundedRectangle(cornerRadius: 4))
-                .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color.white.opacity(0.16)))
+                .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Palette.line))
         } else {
             ImageThumb(url: url, size: 56)
         }

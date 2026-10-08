@@ -122,6 +122,10 @@ final class DayLogWindowTests: XCTestCase {
         let window = try XCTUnwrap(log.window)
         XCTAssertTrue(window.isVisible)
         XCTAssertTrue(window.styleMask.contains(.resizable), "可以拖边缘调整大小")
+        XCTAssertFalse(window.styleMask.contains(.closable), "和笔记一样没有红绿灯")
+        for button in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            XCTAssertTrue(window.standardWindowButton(button)?.isHidden ?? true, "红绿灯都隐藏")
+        }
         XCTAssertNil(window.parent, "独立窗口，不是主窗口的 sheet 或子窗口")
         XCTAssertNil(main.attachedSheet)
         XCTAssertEqual(window.minSize, DayLogWindowController.minSize)

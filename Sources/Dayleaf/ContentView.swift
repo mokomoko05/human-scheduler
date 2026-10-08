@@ -4,27 +4,6 @@ import SwiftUI
 import DayleafCore
 import UniformTypeIdentifiers
 
-enum Palette {
-    static let background = adaptive(0xF6F8FA, 0x0D1117)
-    static let card = adaptive(0xFFFFFF, 0x161B22)
-    static let ink = adaptive(0x1F2328, 0xF0F6FC)
-    static let muted = adaptive(0x59636E, 0x9198A1)
-    static let accent = adaptive(0x0969DA, 0x4493F8)
-    static let soft = adaptive(0xDDF4FF, 0x121D2F)
-    static let line = adaptive(0xD1D9E0, 0x3D444D)
-    static let success = adaptive(0x1A7F37, 0x3FB950)
-    static let deadline = adaptive(0xBC4C00, 0xD29922)
-
-    private static func adaptive(_ light: UInt32, _ dark: UInt32) -> Color {
-        Color(nsColor: NSColor(name: nil) { appearance in
-            let value = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? dark : light
-            return NSColor(srgbRed: Double((value >> 16) & 255) / 255,
-                           green: Double((value >> 8) & 255) / 255,
-                           blue: Double(value & 255) / 255, alpha: 1)
-        })
-    }
-}
-
 struct Card: ViewModifier {
     func body(content: Content) -> some View {
         content.padding(.vertical, 8)
@@ -53,6 +32,7 @@ struct ContentView: View {
     @AppStorage(Prefs.clickExpands) private var clickExpands = true
     @AppStorage(Prefs.weekStartsSunday) private var weekStartsSunday = false
     @AppStorage(Prefs.uiScale) private var uiScale = 1.0
+    @ObservedObject private var themes = ThemeStore.shared
     @EnvironmentObject private var reminders: ReminderScheduler
     @EnvironmentObject private var interaction: WorkspaceInteraction
     @EnvironmentObject private var commands: CommandCenter
@@ -88,7 +68,7 @@ struct ContentView: View {
             }
             if footerVisible { footer.transition(.opacity) }
         }
-        .id(uiScale)
+        .id("\(uiScale)|\(themes.themeID)|\(themes.appearance.rawValue)")
         .animation(Motion.quick, value: footerVisible)
         .background(Palette.background)
         .foregroundStyle(Palette.ink)
@@ -558,6 +538,7 @@ struct ContentView: View {
                                             items: previews[index],
                                             select: { selectFromCalendar(date) },
                                             open: { selectFromCalendar(date, forceExpand: true); addingTodo = true },
+                                            openLog: { selectFromCalendar(date); dayLogWindow.show(store: store, date: date) },
                                             editTask: { item in
                                 interaction.activePane = .calendar
                                 NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)

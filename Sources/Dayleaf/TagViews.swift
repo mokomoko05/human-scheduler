@@ -44,7 +44,7 @@ struct TagChip: View {
             .font(.system(size: UIScale.pt(size), weight: highlighted ? .semibold : .regular))
             .lineLimit(1)
             .padding(.horizontal, 9).padding(.vertical, 4)
-            .foregroundStyle(highlighted ? Color.white : (partial ? Palette.accent : Palette.ink))
+            .foregroundStyle(highlighted ? Palette.onAccent : (partial ? Palette.accent : Palette.ink))
             .background(highlighted ? Palette.accent : Palette.card, in: RoundedRectangle(cornerRadius: 7))
             .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(highlighted ? Color.clear : (partial ? Palette.accent : Palette.line), lineWidth: partial ? 1.5 : 1))
             .contentShape(RoundedRectangle(cornerRadius: 7))

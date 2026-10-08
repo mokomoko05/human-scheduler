@@ -3,6 +3,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject var loginItem: LoginItem
+    @ObservedObject private var themes = ThemeStore.shared
     let failedHotKeys: () -> Set<HotKeyAction>?
     @AppStorage(Prefs.hideCompleted) private var hideCompleted = false
     @AppStorage(Prefs.clickExpands) private var clickExpands = true
@@ -10,6 +11,7 @@ struct SettingsView: View {
     @AppStorage(Prefs.uiScale) private var uiScale = 1.0
     @AppStorage(Prefs.globalHotKey) private var globalHotKey = true
     @AppStorage(Prefs.terminalLayout) private var terminalLayout = TerminalLayout.threePanes.rawValue
+    @AppStorage(Prefs.focusMinLogMinutes) private var focusMinLogMinutes = Prefs.defaultFocusMinLogMinutes
 
     var body: some View {
         Form {
@@ -23,12 +25,22 @@ struct SettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
                 Toggle("隐藏已完成事项", isOn: $hideCompleted)
             }
-            Section("外观") {
+            Section("配色") {
+                ThemePicker(themes: themes)
+            }
+            Section("字号") {
                 Picker("界面字号", selection: $uiScale) {
                     Text("标准").tag(1.0)
                     Text("较大 115%").tag(1.15)
                     Text("更大 130%").tag(1.3)
                 }
+            }
+            Section("专注计时") {
+                Stepper(value: $focusMinLogMinutes, in: 0...120) {
+                    Text(focusMinLogMinutes == 0 ? "所有专注都记入日志" : "专注不足 \(focusMinLogMinutes) 分钟不记日志")
+                }
+                Text("手滑点了播放键、很快就结束的专注，不会在日志里留下「开始 / 结束」记录；用过的时间仍然累加到任务上。设为 0 则每次都记录。")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("通用") {
                 Toggle("登录时自动启动", isOn: Binding(get: { loginItem.enabled }, set: loginItem.setEnabled))
@@ -49,7 +61,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500, height: 620)
+        .frame(width: 520, height: 780)
     }
 }
 
@@ -66,7 +78,7 @@ final class SettingsWindowController {
 
     func show() {
         if window == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 580),
+            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 780),
                                   styleMask: [.titled, .closable], backing: .buffered, defer: false)
             window.title = "设置"
             window.isReleasedWhenClosed = false

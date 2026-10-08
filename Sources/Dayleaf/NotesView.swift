@@ -12,6 +12,7 @@ struct NotesView: View {
     let openDay: (Date) -> Void
     /// 停在哪里（选中的任务 / 标签、搜索词、视图方式）：存进偏好，关掉再开回到原处。
     @ObservedObject var nav: NotesNavigation
+    @ObservedObject private var themes = ThemeStore.shared
     @State private var creatingTag = false
     @State private var newTagName = ""
     @State private var newTagMessage: String?
@@ -85,6 +86,7 @@ struct NotesView: View {
             Divider()
             detail.frame(maxWidth: .infinity)
         }
+        .id(themes.themeID + themes.appearance.rawValue)
         .frame(minWidth: 640, minHeight: 420)
         .background(Palette.background)
         .foregroundStyle(Palette.ink)

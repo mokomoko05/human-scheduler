@@ -7,6 +7,7 @@ import DayleafCore
 struct DayLogView: View {
     @ObservedObject var store: JournalStore
     @State private var date: Date
+    @ObservedObject private var themes = ThemeStore.shared
     let close: () -> Void
     let showMain: () -> Void
 
@@ -31,6 +32,8 @@ struct DayLogView: View {
             DailyLogView(store: store, date: date, collapse: nil, autoFocus: true)
                 .id(JournalDates.key(date))
         }
+        .id(themes.themeID + themes.appearance.rawValue)
+        .background(Palette.background)
         .frame(minWidth: DayLogWindowController.minSize.width, maxWidth: .infinity, minHeight: DayLogWindowController.minSize.height, maxHeight: .infinity)
         // 点日志里的任务标签会跳到主窗口里的那个任务：把主窗口调到前面，日志窗口留着。
         .onReceive(NotificationCenter.default.publisher(for: .dayleafNavigate)) { _ in showMain() }
@@ -56,7 +59,7 @@ struct DayLogView: View {
             Button("完成") { NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil); close() }
                 .keyboardShortcut(.cancelAction).help("关闭 · Esc 或 ⌘J")
         }
-        .padding(.horizontal, 16).padding(.vertical, 10)
+        .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 10)
         .background(Palette.background)
         .foregroundStyle(Palette.ink)
     }

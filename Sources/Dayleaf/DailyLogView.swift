@@ -3,14 +3,15 @@ import SwiftUI
 import UniformTypeIdentifiers
 import DayleafCore
 
+/// 日志界面的颜色：和笔记窗口一样跟随当前配色（不再是固定的黑底）。
 enum TerminalPalette {
-    static let panel = Color(white: 0.035)
-    static let surface = Color.black
-    static let text = Color(white: 0.88)
-    static let muted = Color(white: 0.58)
-    static let green = Color(red: 0.49, green: 0.84, blue: 0.55)
-    static let amber = Color(red: 0.94, green: 0.72, blue: 0.35)
-    static let blue = Color(red: 0.43, green: 0.73, blue: 0.96)
+    static var panel: Color { Palette.background }
+    static var surface: Color { Palette.card }
+    static var text: Color { Palette.ink }
+    static var muted: Color { Palette.muted }
+    static var green: Color { Palette.success }
+    static var amber: Color { Palette.deadline }
+    static var blue: Color { Palette.accent }
 }
 
 @MainActor
@@ -73,7 +74,7 @@ struct DailyLogView: View {
             let total = geometry.size.width
             let left = min(max(total * split, 300), max(300, total - 240))
             HStack(spacing: 0) {
-                logColumn.frame(width: left)
+                logColumn.padding(.leading, 16).padding(.trailing, 6).padding(.bottom, 12).frame(width: left)
                 divider(total: total)
                 reviewColumn.frame(maxWidth: .infinity)
             }
@@ -93,7 +94,6 @@ struct DailyLogView: View {
             ReviewDraftView(store: store, date: date)
         }
         .sheet(item: $previewing) { ImagePreviewSheet(store: store, item: $0) }
-        .environment(\.colorScheme, .dark)
     }
 
     /// 左侧：日志流与输入。
@@ -199,7 +199,7 @@ struct DailyLogView: View {
                     .accessibilityLabel("每日复盘，包含原有总结")
             }
         }
-        .padding(.leading, 10)
+        .padding(.leading, 10).padding(.trailing, 16).padding(.bottom, 12)
         .onReceive(NotificationCenter.default.publisher(for: .dayleafCommitEditing)) { _ in saveLogEdit() }
         .onDisappear { saveLogEdit() }
     }
@@ -251,7 +251,7 @@ struct DailyLogView: View {
     }
 
     private func divider(total: CGFloat) -> some View {
-        Rectangle().fill(Color.white.opacity(0.12)).frame(width: 1)
+        Rectangle().fill(Palette.line).frame(width: 1)
             .frame(width: 9).contentShape(Rectangle())
             .onHover { inside in
                 if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }

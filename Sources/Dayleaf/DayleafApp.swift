@@ -75,6 +75,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         settings = SettingsWindowController(loginItem: loginItem, failedHotKeys: { [weak self] in self?.failedHotKeys })
         shell.handoffWindow = { [unowned self] in otherWindowForHandoff(excluding: nil) }
         NotesWindowController.shared.handoffWindow = { [unowned self] in otherWindowForHandoff(excluding: NotesWindowController.shared.window) }
+        _ = ThemeStore.shared   // 读取已保存的配色和外观并应用
         let dayLog = DayLogWindowController.shared
         dayLog.interaction = interaction
         dayLog.toast = toast
@@ -131,8 +132,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
         if let index = CommandLine.arguments.firstIndex(of: "--snapshot"), CommandLine.arguments.count > index + 1 {
             let destination = CommandLine.arguments[index + 1]
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
-                guard let view = window.contentView,
+            // 截图时可以临时指定配色、外观和要拍的窗口（不会写进偏好）：--theme forest --appearance dark --snapshot-window daylog|notes
+            func option(_ name: String) -> String? {
+                CommandLine.arguments.firstIndex(of: name).flatMap { $0 + 1 < CommandLine.arguments.count ? CommandLine.arguments[$0 + 1] : nil }
+            }
+            if let id = option("--theme") { AppTheme.current = AppTheme.theme(id: id) }
+            if let mode = option("--appearance").flatMap(AppearanceMode.init(rawValue:)) { NSApp.appearance = mode.nsAppearance }
+            var target: NSWindow = window
+            switch option("--snapshot-window") {
+            case "daylog":
+                DayLogWindowController.shared.show(store: store, date: Date())
+                target = DayLogWindowController.shared.window ?? window
+            case "notes":
+                NotesWindowController.shared.show(store: store, taskID: nil, reveal: { _ in }, openDay: { _ in })
+                target = NotesWindowController.shared.window ?? window
+            default: break
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [target] in
+                guard let view = target.contentView,
                       let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { exit(1) }
                 view.cacheDisplay(in: view.bounds, to: bitmap)
                 guard let data = bitmap.representation(using: .png, properties: [:]) else { exit(1) }

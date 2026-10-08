@@ -15,6 +15,8 @@ final class FocusSessionTests: XCTestCase {
         session.store = store
         session.openLink = { _ in }
         session.activateExistingTab = { _ in false }
+        // 夹具里的专注大多是瞬间结束的：默认每次都记，阈值另有专门的测试。
+        session.minLoggedSeconds = { 0 }
         return (session, store, task)
     }
 
@@ -100,6 +102,57 @@ final class FocusSessionTests: XCTestCase {
         XCTAssertEqual(logs.map(\.createdAt), [start, start.addingTimeInterval(1503)])
         XCTAssertTrue(logs.allSatisfy { $0.focus && $0.taskID == task.id })
         XCTAssertTrue(store.notes(for: task.id).isEmpty, "笔记视图屏蔽专注记录")
+    }
+
+    func testFocusShorterThanTheThresholdLeavesNoLogButStillCountsTheTime() async throws {
+        let (session, store, task) = try makeSession()
+        session.minLoggedSeconds = { 300 }
+        let start = JournalDates.calendar.date(bySettingHour: 12, minute: 0, second: 0, of: Date())!
+        let url = try XCTUnwrap(FocusSession.link(in: task.task.title))
+        session.start(task: task, url: url, now: start)
+        XCTAssertEqual(store.days[JournalDates.key(start)]?.logs.count, 1, "进行中能看到「开始专注」")
+        session.stop(reason: "手动结束", now: start.addingTimeInterval(299))
+        XCTAssertNil(session.active)
+        XCTAssertEqual(store.days[JournalDates.key(start)]?.logs.count, 0, "不足 5 分钟：开始那条也撤掉，当天没有任何日志")
+        XCTAssertEqual(store.locate(task.id)?.task.focusSeconds ?? 0, 299, accuracy: 0.01, "时间仍累加到任务上")
+        XCTAssertNil(store.focusTask, "专注状态已清除")
+        store.undoManager.undo()
+        XCTAssertEqual(store.days[JournalDates.key(start)]?.logs.count, 1, "⌘Z 一起还原")
+
+        // 刚好到阈值：正常记录开始和结束。
+        session.start(task: task, url: url, now: start.addingTimeInterval(1000))
+        session.stop(reason: "手动结束", now: start.addingTimeInterval(1300))
+        let logs = try XCTUnwrap(store.days[JournalDates.key(start)]?.logs)
+        XCTAssertTrue(logs.last?.text.hasPrefix("■ 结束专注 · 用时 5 分 0 秒") == true, logs.map(\.text).joined(separator: " | "))
+    }
+
+    func testThresholdOfZeroAlwaysLogsAndOtherLogsOfTheDayAreUntouched() throws {
+        let (session, store, task) = try makeSession()
+        let start = JournalDates.calendar.date(bySettingHour: 12, minute: 0, second: 0, of: Date())!
+        _ = try store.quickLog("当天的普通日志", on: start, now: start.addingTimeInterval(-60))
+        let url = try XCTUnwrap(FocusSession.link(in: task.task.title))
+        session.start(task: task, url: url, now: start)
+        session.stop(reason: "手动结束", now: start.addingTimeInterval(2))
+        XCTAssertEqual(store.days[JournalDates.key(start)]?.logs.map(\.text).count, 3, "阈值 0：再短也记")
+        session.minLoggedSeconds = { 300 }
+        session.start(task: task, url: url, now: start.addingTimeInterval(100))
+        session.stop(reason: "手动结束", now: start.addingTimeInterval(110))
+        XCTAssertEqual(store.days[JournalDates.key(start)]?.logs.count, 3, "太短的那次不增加日志，也不会误删别的日志")
+        XCTAssertEqual(store.days[JournalDates.key(start)]?.logs.first?.text, "当天的普通日志")
+    }
+
+    func testDefaultThresholdIsFiveMinutesAndReadsThePreference() {
+        let key = Prefs.focusMinLogMinutes
+        let saved = UserDefaults.standard.object(forKey: key)
+        defer { if let saved { UserDefaults.standard.set(saved, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) } }
+        UserDefaults.standard.removeObject(forKey: key)
+        XCTAssertEqual(Prefs.focusMinLogSeconds, 300, "默认 5 分钟")
+        UserDefaults.standard.set(12, forKey: key)
+        XCTAssertEqual(Prefs.focusMinLogSeconds, 720)
+        UserDefaults.standard.set(0, forKey: key)
+        XCTAssertEqual(Prefs.focusMinLogSeconds, 0, "0 表示都记")
+        UserDefaults.standard.set(-3, forKey: key)
+        XCTAssertEqual(Prefs.focusMinLogSeconds, 0, "负数当 0")
     }
 
     func testLeavingNeedsConsecutivePollsAndGraceAdoptsRedirectedPage() throws {

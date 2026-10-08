@@ -12,10 +12,15 @@ struct DeadlineDayCell: View {
     let items: [ScheduledTask]
     let select: () -> Void
     let open: () -> Void
+    /// 打开这一天的日志（选中的那一格常驻显示按钮，其他格子悬停时出现）。
+    var openLog: () -> Void = {}
     let editTask: (ScheduledTask) -> Void
     @State private var targeted = false
     @State private var checkboxFrames: [CGRect] = []
     @State private var after = false
+    @State private var hovered = false
+    /// 日志按钮在 preference 里的固定标识：和勾选框一样，点它只打开日志，不触发「选中日期」。
+    static let logButtonID = UUID(uuidString: "00000000-0000-0000-0000-00000000106E")!
     @ObservedObject private var dragSession = TaskDragSession.shared
 
     /// 日历只在任务的截止日期那天显示它。
@@ -37,6 +42,28 @@ struct DeadlineDayCell: View {
     private var today: Bool { JournalDates.calendar.isDateInToday(date) }
     private var inMonth: Bool { JournalDates.calendar.isDate(date, equalTo: displayedMonth, toGranularity: .month) }
 
+    private var logCount: Int { store.entry(for: date).logs.count }
+
+    private var logButton: some View {
+        Button(action: openLog) {
+            HStack(spacing: 2) {
+                Image(systemName: "text.alignleft")
+                if logCount > 0 { Text("\(logCount)").monospacedDigit() }
+            }
+            .font(.system(size: UIScale.pt(10), weight: .medium))
+            .foregroundStyle(selected ? Palette.accent : Palette.muted)
+            .padding(.horizontal, 4).frame(height: 18)
+            .background(Palette.background.opacity(0.7), in: RoundedRectangle(cornerRadius: 4))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(GeometryReader { proxy in
+            Color.clear.preference(key: CheckboxFramesKey.self, value: [Self.logButtonID: proxy.frame(in: .named(Self.space))])
+        })
+        .help(logCount > 0 ? "打开这一天的日志（\(logCount) 条）· ⌘J" : "打开这一天的日志 · ⌘J")
+        .accessibilityLabel("打开这一天的日志")
+    }
+
     var body: some View {
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 3) {
@@ -44,6 +71,7 @@ struct DeadlineDayCell: View {
                     .font(.system(size: UIScale.pt(12), weight: selected || today ? .bold : .medium, design: .rounded))
                     .foregroundStyle(today ? Palette.accent : (inMonth ? Palette.ink : Palette.muted))
                 Spacer(minLength: 0)
+                if selected || hovered { logButton }
                 if !dueToday.isEmpty {
                     Text("\(dueToday.filter(\.task.completed).count)/\(dueToday.count)")
                         .font(.system(size: UIScale.pt(10), design: .monospaced)).foregroundStyle(Palette.muted)
@@ -80,12 +108,14 @@ struct DeadlineDayCell: View {
         .coordinateSpace(name: Self.space)
         .onPreferenceChange(CheckboxFramesKey.self) { checkboxFrames = Array($0.values) }
         .background(CalendarCellClicks(select: select, expand: open, excluded: checkboxFrames))
+        .onHover { hovered = $0 }
         .help("单击选择 · 双击添加事项")
         .accessibilityElement(children: .contain)
         .accessibilityLabel(accessibilityDescription)
         .accessibilityAddTraits(selected ? [.isSelected] : [])
         .accessibilityAction(named: "选择这一天", select)
         .accessibilityAction(named: "添加事项", open)
+        .accessibilityAction(named: "打开这一天的日志", openLog)
         .onDrop(of: [TaskDragPayload.type], delegate: TaskDropTarget(store: store, destination: date, targeted: $targeted, after: $after))
         .onChange(of: dragSession.activeID) { if $0 == nil { targeted = false } }
     }

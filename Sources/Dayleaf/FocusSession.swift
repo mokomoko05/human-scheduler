@@ -23,12 +23,16 @@ final class FocusSession: ObservableObject {
         let title: String
         let url: URL
         let started: Date
+        /// 「开始专注」那条日志；专注太短时要把它撤掉。
+        var startLogID: UUID?
     }
 
     @Published private(set) var active: Active?
     @Published private(set) var elapsed: TimeInterval = 0
     var store: JournalStore?
     var onActiveChange: ((Bool) -> Void)?
+    /// 专注不足这么长（秒）就不在日志里留记录；默认读设置，测试里可替换。
+    var minLoggedSeconds: () -> TimeInterval = { Prefs.focusMinLogSeconds }
     /// 没有授权控制 Safari、只能检测是否离开 Safari 时调用一次（每次专注一次），由界面用提示条告知。
     var onDegraded: (() -> Void)?
     /// 打开链接的动作；测试里替换掉，避免真的启动 Safari。
@@ -82,7 +86,7 @@ final class FocusSession: ObservableObject {
         learnedBundle = nil
         automationDenied = false
         baseline = Self.baseline(for: url)
-        store.addFocusLog("▶ 开始专注", taskID: task.id, now: now)
+        active?.startLogID = store.addFocusLog("▶ 开始专注", taskID: task.id, now: now)
         store.setFocusTask(task.id)
         // 已经开着就切过去，不要再打开一次，否则会回到页面开头。
         Task { @MainActor in
@@ -101,9 +105,14 @@ final class FocusSession: ObservableObject {
         timer?.invalidate()
         timer = nil
         let seconds = max(0, now.timeIntervalSince(session.started))
-        let total = (store?.locate(session.taskID)?.task.focusSeconds ?? 0) + seconds
-        store?.addFocusLog("■ 结束专注 · 用时 \(Self.duration(seconds)) · 累计 \(Self.duration(total)) · \(reason)",
-                           taskID: session.taskID, now: now, seconds: seconds)
+        if seconds < minLoggedSeconds() {
+            // 太短：不留日志（撤掉开始那条、不写结束那条），时间照常累加。
+            store?.discardShortFocus(startLogID: session.startLogID, taskID: session.taskID, seconds: seconds, now: now)
+        } else {
+            let total = (store?.locate(session.taskID)?.task.focusSeconds ?? 0) + seconds
+            store?.addFocusLog("■ 结束专注 · 用时 \(Self.duration(seconds)) · 累计 \(Self.duration(total)) · \(reason)",
+                               taskID: session.taskID, now: now, seconds: seconds)
+        }
         store?.setFocusTask(nil)
         active = nil
         elapsed = 0
@@ -385,7 +394,7 @@ struct FocusPlayButton: View {
                          title: running ? "结束专注计时" : "专注计时：打开链接并开始计时；离开页面自动停止") {
             if running { session.stop(reason: "手动结束") } else { session.start(task: task, url: url) }
         }
-        .foregroundStyle(running ? Color.red : Palette.muted)
+        .foregroundStyle(running ? Color.red : Palette.success)
     }
 }
 
@@ -403,7 +412,7 @@ struct FocusTimeBadge: View {
                 Image(systemName: running ? "timer" : "hourglass")
                 Text(running ? FocusSession.clock(total) : FocusSession.brief(total)).monospacedDigit()
             }
-            .foregroundStyle(running ? Color.green : Palette.muted)
+            .foregroundStyle(running ? Palette.success : Palette.muted)
             .help("在这个任务上已累计专注 \(FocusSession.duration(total))")
             .accessibilityLabel("已专注 \(FocusSession.duration(total))")
         }

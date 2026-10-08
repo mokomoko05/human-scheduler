@@ -618,6 +618,28 @@ public final class JournalStore: ObservableObject {
         return log.id
     }
 
+    /// 太短的专注（比如手滑点了播放键）不留日志：把「开始专注」那条日志撤掉，不写「结束」，
+    /// 用过的时间仍然累加到任务上。和日志的删除、时长的累加是一次操作，⌘Z 一起还原。
+    public func discardShortFocus(startLogID: UUID?, taskID: UUID, seconds: TimeInterval, now: Date = Date()) {
+        guard !isReadOnly else { return }
+        var updated = days
+        if seconds > 0, let located = locate(taskID) {
+            let homeKey = JournalDates.key(located.date)
+            if let index = updated[homeKey]?.todos.firstIndex(where: { $0.id == taskID }) {
+                updated[homeKey]!.todos[index].focusSeconds += seconds
+            }
+        }
+        if let startLogID {
+            for key in updated.keys {
+                guard let index = updated[key]?.logs.firstIndex(where: { $0.id == startLogID && $0.focus }) else { continue }
+                updated[key]!.logs.remove(at: index)
+                if !updated[key]!.hasContent { updated[key] = nil }
+                break
+            }
+        }
+        replaceDays(updated, action: "专注记录")
+    }
+
     public func setFocusTask(_ id: UUID?) {
         if focusTaskID != id { focusTaskID = id }
     }

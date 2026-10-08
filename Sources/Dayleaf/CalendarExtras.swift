@@ -33,7 +33,7 @@ struct MonthJumper: View {
                         Text("\(month)月").font(.system(size: UIScale.pt(13), weight: selected ? .semibold : .regular))
                             .frame(maxWidth: .infinity, minHeight: 28)
                             .background(selected ? Palette.accent : Palette.soft.opacity(0.6), in: RoundedRectangle(cornerRadius: 6))
-                            .foregroundStyle(selected ? Color.white : Palette.ink)
+                            .foregroundStyle(selected ? Palette.onAccent : Palette.ink)
                     }.buttonStyle(.plain)
                 }
             }
