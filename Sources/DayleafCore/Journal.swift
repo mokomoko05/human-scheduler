@@ -171,6 +171,8 @@ private struct JournalDocument: Codable {
     var version = 6
     var days: [String: DayEntry] = [:]
     var nextTaskNumber: Int?
+    /// 标签注册表：显式创建的标签（可以是还没有任何内容的空标签）。用过的标签不需要在这里。
+    var tags: [String]?
 }
 
 @MainActor
@@ -183,6 +185,8 @@ public final class JournalStore: ObservableObject {
     @Published public private(set) var lastAction: ActionEvent?
     /// 正在专注计时的任务。专注期间，没有明确指定任务的日志都记到它名下。
     @Published public private(set) var focusTaskID: UUID?
+    /// 显式创建的标签，包括还没有内容的空标签。
+    @Published public internal(set) var tagRegistry: [String] = []
     public let directory: URL
     @Published public private(set) var hasPendingSave = false
     private var pendingSave: Task<Void, Never>?
@@ -218,6 +222,7 @@ public final class JournalStore: ObservableObject {
                     throw CocoaError(.fileReadUnknown)
                 }
                 days = document.days
+                tagRegistry = TagText.merge([], (document.tags ?? []).compactMap(TagText.normalize))
                 if !readOnlySnapshot { try data.write(to: backupURL, options: .atomic) }
                 nextTaskNumber = max(document.nextTaskNumber ?? 1, (days.values.flatMap(\.todos).compactMap(\.number).max() ?? 0) + 1)
                 if document.version < 6 {
@@ -627,7 +632,7 @@ public final class JournalStore: ObservableObject {
 
     /// 全局快速记录：不经过当天的输入草稿，直接追加一条日志。
     @discardableResult
-    public func quickLog(_ text: String, images: [String] = [], taskID: UUID? = nil, on date: Date, now: Date = Date()) throws -> LogCommand {
+    public func quickLog(_ text: String, images: [String] = [], taskID: UUID? = nil, tags: [String] = [], on date: Date, now: Date = Date()) throws -> LogCommand {
         guard !isReadOnly else { throw LogInputError.readOnly }
         let command = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !images.isEmpty
             ? LogCommand.entry(.note, "") : try LogCommand.parse(text)
@@ -639,7 +644,8 @@ public final class JournalStore: ObservableObject {
         let linked = taskID.flatMap(locate) ?? focusTask
         entry.logs.append(DailyLogEntry(createdAt: now, kind: kind, text: body,
                                         taskID: linked?.id, taskTitle: linked.map { String(TaskText.rendered($0.task.title).characters) },
-                                        taskNumber: linked?.task.number, taskTags: linked?.task.tags ?? [], images: images))
+                                        taskNumber: linked?.task.number, taskTags: linked?.task.tags ?? [],
+                                        tags: TagText.merge([], tags.compactMap(TagText.normalize)), images: images))
         updated[key] = entry
         replaceDays(updated, action: "添加日志")
         return command
@@ -882,7 +888,7 @@ public final class JournalStore: ObservableObject {
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber))
+            let data = try encoder.encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber, tags: tagRegistry.isEmpty ? nil : tagRegistry))
             try makeDailyBackup(data)
             try data.write(to: fileURL, options: .atomic)
             lastSaved = Date()
@@ -896,7 +902,7 @@ public final class JournalStore: ObservableObject {
     public func export(to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber)).write(to: url, options: .atomic)
+        try encoder.encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber, tags: tagRegistry.isEmpty ? nil : tagRegistry)).write(to: url, options: .atomic)
     }
 
     public func tasks(matching query: String = "", filter: AgendaFilter = .all, now: Date = Date()) -> [ScheduledTask] {
@@ -1067,13 +1073,14 @@ public final class JournalStore: ObservableObject {
         let document = try readBackup(url)
         try FileManager.default.createDirectory(at: backupsDirectory, withIntermediateDirectories: true)
         let current = isReadOnly && FileManager.default.fileExists(atPath: fileURL.path)
-            ? try Data(contentsOf: fileURL) : try JSONEncoder().encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber))
+            ? try Data(contentsOf: fileURL) : try JSONEncoder().encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber, tags: tagRegistry.isEmpty ? nil : tagRegistry))
         let recovery = backupsDirectory.appendingPathComponent("before-restore-\(JournalDates.key(Date()))-\(UUID().uuidString).json")
         try current.write(to: recovery, options: .atomic)
         isReadOnly = false
         // 旧版本的备份同样要迁移：所在日期成为截止日期，并补上永久编号。编号只增不减，不会和现有日志里的引用冲突。
         var restored = document.days
         if document.version < 6 { adoptScheduledDayAsDeadline(in: &restored) }
+        tagRegistry = TagText.merge(tagRegistry, (document.tags ?? []).compactMap(TagText.normalize))
         nextTaskNumber = max(nextTaskNumber, document.nextTaskNumber ?? 1, (restored.values.flatMap(\.todos).compactMap(\.number).max() ?? 0) + 1)
         assignMissingNumbers(in: &restored)
         replaceDays(restored, action: "恢复备份", force: true)
@@ -1158,6 +1165,12 @@ public final class JournalStore: ObservableObject {
         } else {
             save()
         }
+    }
+
+    /// 标签注册表变了：落盘（注册表不进撤销栈）。
+    func registryChanged() {
+        hasPendingSave = true
+        save()
     }
 
     private func scheduleSave() {

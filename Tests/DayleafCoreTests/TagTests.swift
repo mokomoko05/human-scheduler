@@ -257,3 +257,136 @@ final class BatchLogTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(DailyLogEntry.self, from: try JSONEncoder().encode(log)).tags, [])
     }
 }
+
+@MainActor
+final class NotebookTests: XCTestCase {
+    private let day = JournalDates.calendar.date(from: DateComponents(year: 2026, month: 10, day: 7))!
+
+    private func makeStore(_ directory: URL? = nil) -> JournalStore {
+        let directory = directory ?? FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return JournalStore(directory: directory)
+    }
+
+    func testEmptyTagExistsSurvivesReloadAndIsSearchable() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = makeStore(directory)
+        XCTAssertEqual(store.createTag("#读书笔记"), "读书笔记")
+        XCTAssertEqual(store.createTag("读书笔记"), "读书笔记", "重复创建返回已有的")
+        XCTAssertEqual(store.createTag("读书笔记 "), "读书笔记")
+        XCTAssertNil(store.createTag("a b"))
+        XCTAssertNil(store.createTag("42"))
+        let empty = try XCTUnwrap(store.allTags().first { $0.name == "读书笔记" })
+        XCTAssertEqual(empty.taskCount, 0)
+        XCTAssertEqual(empty.noteCount, 0)
+
+        let reopened = JournalStore(directory: directory)
+        XCTAssertEqual(reopened.tagRegistry, ["读书笔记"], "空标签落盘，重启后还在")
+        XCTAssertTrue(reopened.allTags().contains { $0.name == "读书笔记" })
+        XCTAssertEqual(JournalStore(directory: directory, readOnlySnapshot: true).allTags().first?.name, "读书笔记", "命令行只读打开也看得到")
+    }
+
+    func testWritingUnderAnEmptyTagWithoutAnyTodoIsRetrievableByTag() throws {
+        let store = makeStore()
+        store.createTag("论文")
+        _ = try store.quickLog("方法部分的想法", tags: ["论文"], on: day, now: day.addingTimeInterval(1))
+        _ = try store.quickLog("无关", on: day, now: day.addingTimeInterval(2))
+        XCTAssertEqual(store.notes(forTag: "论文").map(\.log.text), ["方法部分的想法"])
+        XCTAssertNil(store.notes(forTag: "论文").first?.log.taskID, "不需要关联待办")
+        XCTAssertEqual(store.allTags().first { $0.name == "论文" }?.noteCount, 1)
+        XCTAssertFalse(store.removeEmptyTag("论文"), "有内容的标签不能当空标签删")
+    }
+
+    func testTagWriteCanAlsoLinkATaskAndKeepsFocusFallback() throws {
+        let store = makeStore()
+        let task = try XCTUnwrap(store.addParsedTodo("读摘要 #论文", on: day))
+        _ = try store.quickLog("第一章", taskID: task.id, tags: ["精读"], on: day, now: day.addingTimeInterval(1))
+        let log = try XCTUnwrap(store.allLogs().first?.log)
+        XCTAssertEqual(log.taskID, task.id)
+        XCTAssertEqual(log.tags, ["精读"])
+        XCTAssertEqual(store.tags(of: log), ["论文", "精读"])
+        store.setFocusTask(task.id)
+        _ = try store.quickLog("专注中直接记", tags: ["随笔"], on: day, now: day.addingTimeInterval(2))
+        XCTAssertEqual(store.allLogs().last?.log.taskID, task.id, "专注期间的日志照常关联到专注任务")
+    }
+
+    func testRemoveEmptyTagOnlyWhenUnusedAndHandlesChildren() throws {
+        let store = makeStore()
+        store.createTag("临时")
+        XCTAssertTrue(store.removeEmptyTag("临时"))
+        XCTAssertTrue(store.tagRegistry.isEmpty)
+        store.createTag("项目/子项")
+        XCTAssertTrue(store.allTags().contains { $0.name == "项目" }, "上级随子标签出现")
+        _ = store.addParsedTodo("事 #项目/子项", on: day)
+        XCTAssertFalse(store.removeEmptyTag("项目"), "子标签在用时不能删上级")
+        XCTAssertFalse(store.removeEmptyTag("不存在"))
+    }
+
+    func testRestoreMergesRegistryFromBackup() throws {
+        let source = makeStore()
+        source.createTag("备份里的空标签")
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
+        addTeardownBlock { try? FileManager.default.removeItem(at: file) }
+        try source.export(to: file)
+        let target = makeStore()
+        target.createTag("本地的")
+        try target.restore(from: file)
+        XCTAssertEqual(Set(target.tagRegistry), ["本地的", "备份里的空标签"])
+    }
+
+    func testCopyTextIgnoresImagesAndJoinsInTimeOrder() throws {
+        let store = makeStore()
+        let name = "x.png"
+        _ = try store.quickLog("  第二条 [链接](https://example.com)  ", images: [name], on: day, now: day.addingTimeInterval(2))
+        _ = try store.quickLog("", images: [name], on: day, now: day.addingTimeInterval(3))
+        _ = try store.quickLog("第一条", on: day, now: day.addingTimeInterval(1))
+        let logs = store.allLogs().map(\.log)
+        XCTAssertEqual(logs.map(\.copyText), ["第一条", "第二条 [链接](https://example.com)", nil], "只复制文字、保留原文；只有图片的没有可复制内容")
+        XCTAssertEqual(store.copyText(forLogs: Set(logs.map(\.id))), "第一条\n第二条 [链接](https://example.com)")
+        XCTAssertNil(store.copyText(forLogs: [logs[2].id]))
+        XCTAssertNil(store.copyText(forLogs: []))
+    }
+
+    func testLinkCandidatesRankFocusRecentThenListAndSearch() throws {
+        let store = makeStore()
+        for title in ["甲 #论文", "乙", "丙", "丁 读书", "戊"] { _ = store.addParsedTodo(title, on: day) }
+        func id(_ n: Int) -> UUID { store.locate(number: n)!.id }
+        _ = try store.quickLog("x", taskID: id(3), on: day, now: day.addingTimeInterval(1))
+        _ = try store.quickLog("y", taskID: id(5), on: day, now: day.addingTimeInterval(2))
+        store.setFocusTask(id(2))
+        XCTAssertEqual(store.linkCandidates().compactMap(\.task.number), [2, 5, 3, 1, 4], "专注中 → 最近关联（新的在前）→ 其余按清单顺序")
+        XCTAssertEqual(store.linkCandidates(query: "#4").first?.task.number, 4, "编号精确命中")
+        XCTAssertEqual(store.linkCandidates(query: "4").first?.task.number, 4)
+        XCTAssertEqual(store.linkCandidates(query: "读书").compactMap(\.task.number), [4])
+        XCTAssertEqual(store.linkCandidates(query: "#论文").compactMap(\.task.number), [1], "#标签 按标签找")
+        XCTAssertEqual(store.linkCandidates(query: "论文").compactMap(\.task.number), [1], "普通词也匹配标签名")
+        store.toggleTodo(id(1), on: day)
+        XCTAssertFalse(store.linkCandidates().contains { $0.task.number == 1 }, "已完成的默认不列出")
+        XCTAssertTrue(store.linkCandidates(includeCompleted: true).contains { $0.task.number == 1 })
+        XCTAssertTrue(store.linkCandidates(query: "没有这个词").isEmpty)
+    }
+}
+
+@MainActor
+final class ChapterTests: XCTestCase {
+    private let day = JournalDates.calendar.date(from: DateComponents(year: 2026, month: 10, day: 7))!
+
+    func testNotebookChaptersGroupDirectNotesThenTaggedTodosThenOthers() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = JournalStore(directory: directory)
+        let a = try XCTUnwrap(store.addParsedTodo("读摘要 #论文", on: day))
+        _ = try XCTUnwrap(store.addParsedTodo("看公式 #论文", on: day))
+        let other = try XCTUnwrap(store.addParsedTodo("写周报", on: day))
+        _ = try store.quickLog("直接写在笔记本里", tags: ["论文"], on: day, now: day.addingTimeInterval(1))
+        _ = try store.quickLog("摘要笔记", taskID: a.id, on: day, now: day.addingTimeInterval(2))
+        _ = try store.quickLog("别的待办上的，但日志自己带了标签", taskID: other.id, tags: ["论文"], on: day, now: day.addingTimeInterval(3))
+
+        let chapters = store.chapters(forTag: "论文")
+        XCTAssertEqual(chapters.map(\.title), ["直接记录", "读摘要", "看公式", "写周报"])
+        XCTAssertEqual(chapters.map { $0.notes.count }, [1, 1, 0, 1], "没有笔记的章节也列出来")
+        XCTAssertNil(chapters[0].taskID)
+        XCTAssertEqual(chapters[1].number, 1)
+        XCTAssertTrue(store.chapters(forTag: "不存在").isEmpty)
+    }
+}

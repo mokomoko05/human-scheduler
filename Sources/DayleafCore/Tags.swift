@@ -112,6 +112,7 @@ extension JournalStore {
             return result
         }
 
+        _ = levels(tagRegistry)
         for item in tasks() {
             for key in levels(item.task.tags) {
                 let previous = taskCounts[key] ?? (0, 0)
@@ -177,5 +178,128 @@ extension JournalStore {
             guard let index = entry.todos.firstIndex(where: { $0.id == id }) else { return }
             entry.todos[index].tags = normalized
         }
+    }
+}
+
+// MARK: - 标签注册表
+
+extension JournalStore {
+    /// 创建一个标签（可以是还没有任何内容的空标签）。已经存在（不区分大小写）就返回已有的写法。名字不合法返回 nil。
+    @discardableResult
+    public func createTag(_ raw: String) -> String? {
+        guard !isReadOnly, let name = TagText.normalize(raw) else { return nil }
+        if let existing = allTags().first(where: { $0.id == TagText.key(name) }) { return existing.name }
+        tagRegistry.append(name)
+        registryChanged()
+        return name
+    }
+
+    /// 只有注册表里的、没有任何待办和日志在用的标签才能删除；用着的标签要先去掉它的使用处。
+    @discardableResult
+    public func removeEmptyTag(_ name: String) -> Bool {
+        guard !isReadOnly, let summary = allTags().first(where: { $0.id == TagText.key(name) }),
+              summary.taskCount == 0, summary.noteCount == 0 else { return false }
+        let key = TagText.key(name)
+        // 空的上级标签（`论文`）可能只是被子标签带出来的：有子标签在用时不删。
+        guard !allTags().contains(where: { $0.id != key && $0.id.hasPrefix(key + "/") && ($0.taskCount > 0 || $0.noteCount > 0) }) else { return false }
+        let before = tagRegistry.count
+        tagRegistry.removeAll { TagText.key($0) == key || TagText.key($0).hasPrefix(key + "/") }
+        guard tagRegistry.count != before else { return false }
+        registryChanged()
+        return true
+    }
+}
+
+// MARK: - 复制日志文字
+
+extension DailyLogEntry {
+    /// 复制到剪贴板的内容：只有文字（保留原文，包括 Markdown 链接写法），图片不算。没有文字时为 nil。
+    public var copyText: String? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+extension JournalStore {
+    /// 把选中的日志按时间从早到晚拼成一段文字，每条一行（多行日志保持原样）；都没有文字时为 nil。
+    public func copyText(forLogs ids: Set<UUID>) -> String? {
+        let parts = allLogs(includeFocus: true).filter { ids.contains($0.log.id) }.compactMap(\.log.copyText)
+        return parts.isEmpty ? nil : parts.joined(separator: "\n")
+    }
+
+    /// 「关联待办」的候选：专注中的在最前，其次是最近被日志关联过的，再是其余的按清单顺序；`query` 按标题、编号（`3` 或 `#3`）、标签筛选。
+    public func linkCandidates(query: String = "", includeCompleted: Bool = false, recentLimit: Int = 8) -> [ScheduledTask] {
+        var pool = sortedTasks().filter { includeCompleted || !$0.task.completed }
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            let digits = trimmed.hasPrefix("#") ? String(trimmed.dropFirst()) : trimmed
+            let number = Int(digits)
+            let tag = TagText.searchTag(trimmed)
+            pool = pool.filter { item in
+                if let number, item.task.number == number { return true }
+                if let tag { return item.task.tags.contains { TagText.matches($0, query: tag) } }
+                let title = String(TaskText.rendered(item.task.title, alias: item.task.calendarName).characters)
+                return title.localizedStandardContains(trimmed) || item.task.title.localizedStandardContains(trimmed)
+                    || item.task.tags.contains { $0.localizedStandardContains(trimmed) }
+            }
+        }
+        // 没有查询词时才按「专注中 / 最近」排前面；有查询词时，匹配的按同样的次序，编号精确命中的在最前。
+        var latest: [UUID: Date] = [:]
+        for day in days.values { for log in day.logs where !log.focus { if let id = log.taskID { latest[id] = max(latest[id] ?? .distantPast, log.createdAt) } } }
+        let recent = Set(latest.sorted { $0.value > $1.value }.prefix(recentLimit).map(\.key))
+        let order = Dictionary(uniqueKeysWithValues: pool.enumerated().map { ($1.id, $0) })
+        func rank(_ item: ScheduledTask) -> Int {
+            if let number = Int(trimmed.hasPrefix("#") ? String(trimmed.dropFirst()) : trimmed), item.task.number == number { return 0 }
+            if item.id == focusTaskID { return 1 }
+            return recent.contains(item.id) ? 2 : 3
+        }
+        return pool.sorted {
+            let (a, b) = (rank($0), rank($1))
+            if a != b { return a < b }
+            if a == 2 { return (latest[$0.id] ?? .distantPast) > (latest[$1.id] ?? .distantPast) }
+            return (order[$0.id] ?? 0) < (order[$1.id] ?? 0)
+        }
+    }
+}
+
+// MARK: - 笔记本（标签）与章节（待办）
+
+public struct NotebookChapter: Identifiable {
+    /// nil 表示「直接记录」：没有关联待办、直接记在标签下的内容。
+    public let taskID: UUID?
+    public let number: Int?
+    public let title: String
+    public let completed: Bool
+    public let notes: [JournalStore.LoggedLog]
+    public var id: String { taskID?.uuidString ?? "direct" }
+}
+
+extension JournalStore {
+    /// 把一个标签（笔记本）的内容按待办（章节）分组：先是「直接记录」，然后是带这个标签的待办（即使还没有笔记），
+    /// 最后是日志自己带这个标签、但关联的待办没有这个标签的那些待办。章节里的笔记按时间从早到晚。
+    public func chapters(forTag tag: String) -> [NotebookChapter] {
+        let notes = notes(forTag: tag)
+        let grouped = Dictionary(grouping: notes) { $0.log.taskID }
+        var result: [NotebookChapter] = []
+        if let direct = grouped[nil], !direct.isEmpty {
+            result.append(NotebookChapter(taskID: nil, number: nil, title: "直接记录", completed: false, notes: direct))
+        }
+        var used = Set<UUID>()
+        for item in tasks(taggedWith: tag) {
+            used.insert(item.id)
+            result.append(NotebookChapter(taskID: item.id, number: item.task.number,
+                                          title: String(TaskText.rendered(item.task.title).characters),
+                                          completed: item.task.completed, notes: grouped[item.id] ?? []))
+        }
+        let others = grouped.compactMap { key, value -> (UUID, [LoggedLog])? in key.map { ($0, value) } }
+            .filter { !used.contains($0.0) }
+            .sorted { ($0.1.first?.log.createdAt ?? .distantPast) < ($1.1.first?.log.createdAt ?? .distantPast) }
+        for (id, items) in others {
+            let live = locate(id)
+            result.append(NotebookChapter(taskID: id, number: live?.task.number ?? items.first?.log.taskNumber,
+                                          title: live.map { String(TaskText.rendered($0.task.title).characters) } ?? items.first?.log.taskTitle ?? "（任务已删除）",
+                                          completed: live?.task.completed ?? false, notes: items))
+        }
+        return result
     }
 }

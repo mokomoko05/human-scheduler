@@ -33,6 +33,8 @@ enum AppCommand {
     case selectAdjacent(Int), toggleSelected, editSelected, deleteSelected, deselect
     case reveal(UUID)
     case export, backups, settings, quickCapture, notes, toggleNotes
+    /// 全局快捷键触发：`appWasActive` 为 false 表示按键时 Scheduler 在后台，此时只把笔记调到最前面。
+    case notesHotKey(appWasActive: Bool)
 }
 
 @MainActor

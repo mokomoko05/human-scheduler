@@ -12,6 +12,14 @@ struct NotesView: View {
     let openDay: (Date) -> Void
     @State private var selection: UUID?
     @State private var tagSelection: String?
+    @State private var chapterView = true
+    @State private var creatingTag = false
+    @State private var newTagName = ""
+    @State private var newTagMessage: String?
+    @State private var tagDraft = ""
+    @State private var tagDraftImages: [String] = []
+    @State private var tagLink: UUID?
+    @State private var tagFocused = false
     @State private var query = ""
     @State private var previewing: ImagePreviewItem?
     @State private var draft = ""
@@ -91,10 +99,10 @@ struct NotesView: View {
             .background(Palette.card, in: RoundedRectangle(cornerRadius: 7))
             let list = topics
             let tagList = tagRows
-            if list.isEmpty && tagList.isEmpty {
+            if list.isEmpty && tagList.isEmpty && !query.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "note.text").font(.system(size: 26, weight: .light)).foregroundStyle(Palette.muted.opacity(0.6))
-                    Text(query.isEmpty ? "还没有笔记" : "没有匹配的任务或标签").font(.system(size: 13, weight: .medium))
+                    Text("没有匹配的任务或标签").font(.system(size: 13, weight: .medium))
                     if query.isEmpty {
                         Text("在日志输入框写 /link #1 把日志记到某个任务名下，或直接写 /done #1 内容。笔记按任务汇总在这里；给待办打上标签，还能按标签汇总。")
                             .font(.system(size: 12)).foregroundStyle(Palette.muted).multilineTextAlignment(.center)
@@ -103,10 +111,12 @@ struct NotesView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
-                        if !tagList.isEmpty {
-                            sectionTitle("标签")
-                            ForEach(tagList) { tagRow($0) }
+                        tagSectionHeader
+                        if tagList.isEmpty {
+                            Text("还没有标签。点右上角 + 新建一个笔记本，或给待办打上 #标签。")
+                                .font(.system(size: 11)).foregroundStyle(Palette.muted).padding(.horizontal, 10).padding(.bottom, 4)
                         }
+                        ForEach(tagList) { tagRow($0) }
                         if !list.isEmpty {
                             sectionTitle("任务")
                             ForEach(list) { topic in topicRow(topic) }
@@ -123,6 +133,44 @@ struct NotesView: View {
             .padding(.horizontal, 10).padding(.top, 6)
     }
 
+    /// 「标签」小标题，右边的 + 创建一个新标签（笔记本），可以先建空的、以后再写。
+    private var tagSectionHeader: some View {
+        HStack(spacing: 4) {
+            sectionTitle("标签（笔记本）")
+            Spacer(minLength: 0)
+            Button { newTagName = ""; newTagMessage = nil; creatingTag = true } label: {
+                Image(systemName: "plus").font(.system(size: 11, weight: .semibold)).frame(width: 24, height: 22).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).foregroundStyle(Palette.accent).padding(.top, 6)
+            .help("新建标签：可以先建一个空的笔记本，以后再往里写").accessibilityLabel("新建标签")
+            .disabled(store.isReadOnly)
+            .popover(isPresented: $creatingTag, arrowEdge: .trailing) { newTagPopover }
+        }
+    }
+
+    private var newTagPopover: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("新建标签").font(.headline)
+            TextField("标签名，例如 读书笔记 或 项目/子项", text: $newTagName).textFieldStyle(.roundedBorder).onSubmit(createTag)
+            if let newTagMessage { Text(newTagMessage).font(.caption).foregroundStyle(.orange) }
+            Text("标签不含空格；用 / 分层，`论文/方法` 属于 `论文`。").font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("取消") { creatingTag = false }.keyboardShortcut(.cancelAction)
+                Button("创建") { createTag() }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+            }
+        }.padding(16).frame(width: 300)
+    }
+
+    private func createTag() {
+        guard let name = store.createTag(newTagName) else {
+            newTagMessage = "标签不能为空、含空格，或是纯数字（#3 表示任务编号）"
+            return
+        }
+        creatingTag = false
+        select(tag: name)
+    }
+
     private func select(task id: UUID) {
         selection = id
         tagSelection = nil
@@ -132,7 +180,7 @@ struct NotesView: View {
     private func select(tag: String) {
         tagSelection = tag
         selection = nil
-        draft = ""; draftImages = []; error = nil
+        draft = ""; draftImages = []; tagDraft = ""; tagDraftImages = []; tagLink = nil; error = nil
     }
 
     private func tagRow(_ summary: JournalStore.TagSummary) -> some View {
@@ -141,8 +189,12 @@ struct NotesView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("#" + summary.name).font(.system(size: 13, weight: .medium)).foregroundStyle(Palette.accent).lineLimit(1)
                 HStack(spacing: 8) {
-                    Text("\(summary.taskCount) 个待办").monospacedDigit()
-                    Text("\(summary.noteCount) 条笔记").monospacedDigit()
+                    if summary.taskCount == 0 && summary.noteCount == 0 {
+                        Text("空标签")
+                    } else {
+                        Text("\(summary.taskCount) 个待办").monospacedDigit()
+                        Text("\(summary.noteCount) 条笔记").monospacedDigit()
+                    }
                     Spacer(minLength: 4)
                     if summary.lastActivity > .distantPast { Text(summary.lastActivity.relativeLabel) }
                 }
@@ -155,6 +207,15 @@ struct NotesView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("标签 \(summary.name)，\(summary.taskCount) 个待办，\(summary.noteCount) 条笔记")
+        .contextMenu {
+            if summary.taskCount == 0 && summary.noteCount == 0 {
+                Button("删除这个空标签", role: .destructive) {
+                    if store.removeEmptyTag(summary.name), tagSelection.map({ TagText.key($0) == summary.id }) == true { tagSelection = nil }
+                }
+            } else {
+                Text("正在使用的标签不能删除")
+            }
+        }
     }
 
     private func topicRow(_ topic: JournalStore.NoteTopic) -> some View {
@@ -201,7 +262,7 @@ struct NotesView: View {
                         LazyVStack(alignment: .leading, spacing: 4) {
                             ForEach(Dictionary(grouping: notes, by: \.key).sorted { $0.key < $1.key }, id: \.key) { group in
                                 dayHeader(group.key, date: group.value[0].date)
-                                ForEach(group.value) { item in noteRow(item.log) }
+                                ForEach(group.value) { item in noteRow(item) }
                             }
                             Color.clear.frame(height: 1).id("end")
                         }.padding(20)
@@ -275,9 +336,10 @@ struct NotesView: View {
         .help("跳到这一天的日志")
     }
 
-    private func noteRow(_ log: DailyLogEntry, showTask: Bool = false) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text(Self.time(log.createdAt)).font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.muted).padding(.top, 2)
+    private func noteRow(_ item: JournalStore.LoggedLog, showTask: Bool = false, showDate: Bool = false) -> some View {
+        let log = item.log
+        return HStack(alignment: .top, spacing: 10) {
+            Text((showDate ? String(item.key.dropFirst(5)) + " " : "") + Self.time(log.createdAt)).font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.muted).padding(.top, 2)
             Text(log.kind.label).font(.system(size: 10, weight: .semibold, design: .monospaced))
                 .padding(.horizontal, 5).padding(.vertical, 1)
                 .background(kindColor(log.kind).opacity(0.16), in: RoundedRectangle(cornerRadius: 4))
@@ -308,8 +370,19 @@ struct NotesView: View {
                 }
             }
             Spacer(minLength: 0)
+            Button { copy(log) } label: {
+                Image(systemName: "doc.on.doc").font(.system(size: 11)).frame(width: 24, height: 22).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).foregroundStyle(Palette.muted)
+            .disabled(log.copyText == nil)
+            .help(log.copyText == nil ? "这条只有图片，没有文字可复制" : "复制这条的文字（不含图片）")
+            .accessibilityLabel("复制这条笔记的文字")
         }
         .padding(.vertical, 5)
+    }
+
+    private func copy(_ log: DailyLogEntry) {
+        error = LogClipboard.copy(store: store, ids: [log.id]) > 0 ? "已复制这条笔记的文字" : "这条只有图片，没有文字可复制"
     }
 
     // MARK: - 右侧：一个标签名下所有待办的笔记
@@ -328,27 +401,58 @@ struct NotesView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 4) {
-                        if notes.isEmpty {
-                            Text("这个标签名下的待办还没有笔记。给它们写日志（/link #编号，或专注时记录）后会汇总在这里。")
+                        if notes.isEmpty && tasks.isEmpty {
+                            Text("这个笔记本还是空的。在下面直接写一条，或给待办打上 #\(tag)。")
                                 .font(.system(size: 12)).foregroundStyle(Palette.muted).padding(.vertical, 12)
                         }
-                        ForEach(Dictionary(grouping: notes, by: \.key).sorted { $0.key < $1.key }, id: \.key) { group in
-                            dayHeader(group.key, date: group.value[0].date)
-                            ForEach(group.value) { item in noteRow(item.log, showTask: true) }
-                        }
+                        if chapterView { chapterList(tag) } else { dateList(notes) }
                         Color.clear.frame(height: 1).id("end")
                     }.padding(20)
                 }
                 .onAppear { proxy.scrollTo("end", anchor: .bottom) }
                 .onChange(of: tagSelection) { _ in proxy.scrollTo("end", anchor: .bottom) }
+                .onChange(of: notes.count) { _ in withAnimation(Motion.quick) { proxy.scrollTo("end", anchor: .bottom) } }
             }
             Divider()
-            HStack {
-                Text(error ?? "要追加笔记，请先在左侧选一个具体的任务。")
-                    .font(.system(size: 11)).foregroundStyle(error?.hasPrefix("已复制") == true ? Palette.success : Palette.muted)
-                Spacer()
+            tagComposer(tag)
+        }
+    }
+
+    /// 按待办（章节）：标签是笔记本，每个待办是里面的一章。
+    @ViewBuilder
+    private func chapterList(_ tag: String) -> some View {
+        ForEach(store.chapters(forTag: tag)) { chapter in
+            chapterHeader(chapter)
+            if chapter.notes.isEmpty {
+                Text("还没有笔记").font(.system(size: 11)).foregroundStyle(Palette.muted).padding(.leading, 4).padding(.bottom, 6)
             }
-            .padding(.horizontal, 20).padding(.vertical, 12)
+            ForEach(chapter.notes) { item in noteRow(item, showDate: true) }
+        }
+    }
+
+    private func chapterHeader(_ chapter: NotebookChapter) -> some View {
+        let canOpen = chapter.taskID.map { id in store.noteTopics().contains { $0.id == id } } ?? false
+        return Button { if let id = chapter.taskID, canOpen { select(task: id) } } label: {
+            HStack(spacing: 6) {
+                Image(systemName: chapter.taskID == nil ? "square.and.pencil" : (chapter.completed ? "checkmark.circle.fill" : "circle"))
+                    .foregroundStyle(chapter.completed ? Palette.success : Palette.muted).font(.system(size: 12))
+                if let number = chapter.number {
+                    Text("#\(number)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.muted)
+                }
+                Text(chapter.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                Text("\(chapter.notes.count) 条").font(.system(size: 11)).foregroundStyle(Palette.muted)
+                Rectangle().fill(Palette.line).frame(height: 1)
+            }
+        }
+        .buttonStyle(.plain).foregroundStyle(Palette.accent)
+        .padding(.top, 14).padding(.bottom, 4)
+        .help(canOpen ? "只看这个待办的全部笔记" : "")
+    }
+
+    private func dateList(_ notes: [JournalStore.LoggedLog]) -> some View {
+        ForEach(Dictionary(grouping: notes, by: \.key).sorted { $0.key < $1.key }, id: \.key) { group in
+            dayHeader(group.key, date: group.value[0].date)
+            ForEach(group.value) { item in noteRow(item, showTask: true) }
         }
     }
 
@@ -361,35 +465,70 @@ struct NotesView: View {
                         .font(.system(size: 12)).foregroundStyle(Palette.muted)
                 }
                 Spacer()
+                Picker("", selection: $chapterView) {
+                    Text("按待办").tag(true)
+                    Text("按日期").tag(false)
+                }.pickerStyle(.segmented).labelsHidden().frame(width: 140)
                 Button {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(Self.markdown(tag: tag, tasks: tasks, notes: notes), forType: .string)
                     error = "已复制为 Markdown"
                 } label: { Label("复制为 Markdown", systemImage: "doc.on.doc") }
             }
-            if !tasks.isEmpty {
-                FlowLayout(spacing: 6) {
-                    ForEach(tasks, id: \.id) { item in
-                        Button {
-                            if store.noteTopics().contains(where: { $0.id == item.id }) { select(task: item.id) }
-                            else { close(); reveal(item.id) }
-                        } label: {
-                            HStack(spacing: 4) {
-                                Image(systemName: item.task.completed ? "checkmark.circle.fill" : "circle")
-                                    .foregroundStyle(item.task.completed ? Palette.success : Palette.muted)
-                                Text((item.task.number.map { "#\($0) " } ?? "") + String(TaskText.rendered(item.task.title).characters)).lineLimit(1)
-                            }
-                            .font(.system(size: 11))
-                            .padding(.horizontal, 7).padding(.vertical, 3)
-                            .background(Palette.card, in: RoundedRectangle(cornerRadius: 6))
-                        }
-                        .buttonStyle(.plain)
-                        .help("有笔记就查看它的笔记，没有就回到清单中选中它")
-                    }
-                }
-            }
         }
         .padding(.horizontal, 20).padding(.vertical, 14)
+    }
+
+    /// 标签页底部：直接往这个笔记本里写，不需要关联待办；也可以顺手选一个待办作为它的章节。
+    private func tagComposer(_ tag: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if !tagDraftImages.isEmpty {
+                PendingImagesStrip(store: store, names: tagDraftImages,
+                                   remove: { name in tagDraftImages.removeAll { $0 == name } },
+                                   preview: { previewing = ImagePreviewItem(names: tagDraftImages, index: $0) })
+            }
+            HStack(spacing: 8) {
+                Image(systemName: "square.and.pencil").foregroundStyle(Palette.accent)
+                TaskInput(text: $tagDraft, focused: $tagFocused,
+                          placeholder: "写进 #\(tag)，回车保存，⌘V 粘贴图片",
+                          fontSize: 13, submit: { submitTag(tag) }, onPasteImages: { datas in
+                    tagDraftImages += ImageTools.save(datas, in: store)
+                    tagFocused = true
+                }).frame(height: 24).disabled(store.isReadOnly)
+                LinkPickerButton(store: store, current: tagLink, pick: { tagLink = $0 }) {
+                    Label(tagLink.flatMap { store.locate($0) }.map { FocusHint.label($0) } ?? "关联待办（可选）", systemImage: "link")
+                        .font(.system(size: 11)).lineLimit(1).frame(maxWidth: 190)
+                        .foregroundStyle(tagLink == nil ? Palette.muted : Palette.accent)
+                }.fixedSize().disabled(store.isReadOnly).help("把这条记在某个待办（章节）名下；不选就是直接记在笔记本里")
+                Button { submitTag(tag) } label: { Image(systemName: "arrow.turn.down.left") }
+                    .buttonStyle(HitAreaButtonStyle())
+                    .disabled(store.isReadOnly || (tagDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && tagDraftImages.isEmpty))
+            }
+            .padding(.horizontal, 12).padding(.vertical, 6)
+            .background(Palette.card, in: RoundedRectangle(cornerRadius: 8))
+            if let focus = store.focusTask, tagLink == nil {
+                Text("专注中：不选待办时，这条会关联到 \(FocusHint.label(focus))").font(.system(size: 11)).foregroundStyle(Palette.muted)
+            }
+            if let error {
+                Text(error).font(.system(size: 11)).foregroundStyle(error.hasPrefix("已复制") ? Palette.success : Palette.deadline)
+            }
+        }
+        .padding(.horizontal, 20).padding(.vertical, 12)
+    }
+
+    private func submitTag(_ tag: String) {
+        let text = tagDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty || !tagDraftImages.isEmpty else { return }
+        do {
+            let command = try store.quickLog(text, images: tagDraftImages, taskID: tagLink, tags: [tag], on: Date())
+            guard case .entry = command else { error = "这里只能写笔记，不支持 \(text) 这类命令。"; return }
+            tagDraft = ""
+            tagDraftImages = []
+            tagLink = nil
+            error = nil
+            tagFocused = true
+            ImageIndexer.run(store: store)
+        } catch { self.error = error.localizedDescription }
     }
 
     /// 标签的笔记导出为 Markdown：先列出待办，再按日期分组，每条标明来自哪个待办。

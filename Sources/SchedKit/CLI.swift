@@ -351,7 +351,7 @@ public enum CLI {
             if args.value("last") == nil { effective.last = nil }
             let rows = LogQuery.rows(in: store, filter: effective)
             let tasks = store.tasks(taggedWith: tag)
-            if tasks.isEmpty, rows.isEmpty { return fail("没有标签「\(tag)」。运行 sched tags 查看所有标签；任务编号请直接写数字，例如 sched notes 3。", code: 1) }
+            if tasks.isEmpty, rows.isEmpty, !store.allTags().contains(where: { $0.id == TagText.key(tag) }) { return fail("没有标签「\(tag)」。运行 sched tags 查看所有标签；任务编号请直接写数字，例如 sched notes 3。", code: 1) }
             let title = "#" + tag
             if format() == "text" {
                 let ctx = renderContext(forImages: args.has("images"))

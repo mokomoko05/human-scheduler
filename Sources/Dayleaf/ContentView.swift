@@ -185,6 +185,10 @@ struct ContentView: View {
         case .today: select(Date())
         case .search: agenda = .all
         case .notes: showNotes(tag: nil)
+        case .notesHotKey(let appWasActive):
+            if !notesWindow.isVisible { showNotes(tag: nil) }
+            else if appWasActive { notesWindow.close() }
+            else { notesWindow.window?.makeKeyAndOrderFront(nil) }
         case .toggleNotes:
             if notesWindow.isVisible { notesWindow.close() } else { showNotes(tag: nil) }
         case .agenda(let filter): agenda = filter

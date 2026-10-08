@@ -32,8 +32,6 @@ private final class MenuAction: NSObject {
     var toggleKey: String?
     var toggleDefault = false
     var disabledWhileTyping = false
-    /// 内置终端在前台时让出按键（比如 ⌃N 在 shell 里是下一条历史，⌃M 是回车）。
-    var disabledInTerminal = false
     init(_ run: @escaping () -> Void) { self.run = run }
 }
 
@@ -53,6 +51,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var hotKeysRegistered = false
     private var hotKeysAttempted = false
     private let logHotKey = GlobalHotKey(action: .log)
+    private let notesHotKey = GlobalHotKey(action: .notes)
     private let mainHotKey = GlobalHotKey(action: .main)
     private let shellHotKey = GlobalHotKey(action: .shell)
     private let shell = ShellWindowController()
@@ -112,6 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [store] in store?.removeUnusedImages() }
             quickCapture.installStatusItem()
             logHotKey.onPress = { [weak self] in self?.quickCapture.toggle(.log) }
+            notesHotKey.onPress = { [weak self] in self?.toggleNotesGlobally() }
             mainHotKey.onPress = { [weak self] in self?.toggleMainWindow() }
             shellHotKey.onPress = { [weak self] in self?.shell.toggle() }
             applyHotKeyPreference()
@@ -233,7 +233,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // MARK: - 全局快捷键
 
     private var allHotKeys: [(HotKeyAction, GlobalHotKey)] {
-        [(.main, mainHotKey), (.shell, shellHotKey), (.log, logHotKey)]
+        [(.main, mainHotKey), (.shell, shellHotKey), (.log, logHotKey), (.notes, notesHotKey)]
     }
 
     /// 被其他应用占用而注册失败的动作，设置里据此逐条提示。
@@ -249,6 +249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             hotKeysAttempted = false
             hotKeysRegistered = false
             failedHotKeys = []
+            applyNotesShortcut()
         }
     }
 
@@ -257,6 +258,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         failedHotKeys = []
         for (action, hotKey) in allHotKeys where !hotKey.rebind(HotKeyStore.binding(for: action)) { failedHotKeys.insert(action) }
         hotKeysRegistered = failedHotKeys.isEmpty
+        applyNotesShortcut()
     }
 
     private func rebindHotKeysIfNeeded() {
@@ -373,28 +375,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             let on = defaults.object(forKey: key) == nil ? action.toggleDefault : defaults.bool(forKey: key)
             item.state = on ? .on : .off
         }
-        if action.disabledInTerminal, NSApp.keyWindow is TerminalWindow { return false }
         if action.disabledWhileTyping { return !isEditingText && NSApp.keyWindow === window }
         return true
     }
 
-    /// 「笔记」菜单项，快捷键读设置里的绑定（默认 ⌃N），改键后立即更新。
+    /// 「笔记」菜单项。全局快捷键生效时，按键由全局热键处理，菜单项不再绑定同一个键（否则会触发两次），只在标题里写出快捷键；
+    /// 全局快捷键被关闭或这个组合被别的应用占用时，退回到菜单快捷键（Scheduler 在前台时有效）。
     private var notesMenuItem = NSMenuItem()
 
     private func applyNotesShortcut() {
-        let equivalent = HotKeyStore.binding(for: .notes).menuEquivalent
-        notesMenuItem.keyEquivalent = equivalent.key
-        notesMenuItem.keyEquivalentModifierMask = equivalent.mask
+        let binding = HotKeyStore.binding(for: .notes)
+        let globalWorks = hotKeysAttempted && !failedHotKeys.contains(.notes)
+        if globalWorks {
+            notesMenuItem.title = "笔记（开 / 关）    \(binding.label)"
+            notesMenuItem.keyEquivalent = ""
+        } else {
+            let equivalent = binding.menuEquivalent
+            notesMenuItem.title = "笔记（开 / 关）"
+            notesMenuItem.keyEquivalent = equivalent.key
+            notesMenuItem.keyEquivalentModifierMask = equivalent.mask
+        }
+    }
+
+    /// 全局快捷键：笔记窗口开着就关；没开就打开并把 Scheduler 调到前台。Scheduler 在后台时，笔记已开着则只是调到最前面。
+    private func toggleNotesGlobally() {
+        let wasActive = NSApp.isActive
+        NSApp.unhide(nil)
+        if !wasActive { NSApp.activate(ignoringOtherApps: true) }
+        commands.send(.notesHotKey(appWasActive: wasActive))
     }
 
     private func menuItem(_ title: String, key: String = "", modifiers: NSEvent.ModifierFlags = [.command],
-                          typingSensitive: Bool = false, yieldsToTerminal: Bool = false, toggle: (key: String, defaultOn: Bool)? = nil,
+                          typingSensitive: Bool = false, toggle: (key: String, defaultOn: Bool)? = nil,
                           _ run: @escaping () -> Void = {}) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: #selector(runMenuAction(_:)), keyEquivalent: key)
         if !key.isEmpty { item.keyEquivalentModifierMask = modifiers }
         let action = MenuAction(run)
         action.disabledWhileTyping = typingSensitive
-        action.disabledInTerminal = yieldsToTerminal
         if let toggle { action.toggleKey = toggle.key; action.toggleDefault = toggle.defaultOn }
         item.representedObject = action
         item.target = self
@@ -491,7 +508,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         ])
         mainMenu.addItem(task)
 
-        notesMenuItem = menuItem("笔记（开 / 关）", yieldsToTerminal: true, send(.toggleNotes))
+        notesMenuItem = menuItem("笔记（开 / 关）", send(.toggleNotes))
         applyNotesShortcut()
         let view = submenu("视图", [
             menuItem("回到今天", send(.today)),

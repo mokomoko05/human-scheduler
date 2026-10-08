@@ -262,6 +262,8 @@ struct QuickCaptureView: View {
     @State private var focused = true
     @State private var message: String?
     @State private var failure: String?
+    /// 这条日志要带的标签（不需要关联待办）。
+    @State private var tags: [String] = []
 
     private var mode: QuickCaptureMode {
         get { model.mode }
@@ -301,6 +303,7 @@ struct QuickCaptureView: View {
                                    remove: { name in images.removeAll { $0 == name } },
                                    preview: { NSWorkspace.shared.open(store.imageURL(images[$0])) })
             }
+            if mode == .log { TagSelectionBar(store: store, selection: $tags) }
             Group {
                 if let message {
                     Label(message, systemImage: "checkmark.circle.fill").foregroundStyle(Palette.success)
@@ -312,7 +315,7 @@ struct QuickCaptureView: View {
                     if mode == .log, let task = store.focusTask {
                         Label("专注中：这条日志会关联到 \(FocusHint.label(task))", systemImage: "timer").foregroundStyle(Palette.success).lineLimit(1)
                     } else {
-                        Text(mode == .todo ? "回车添加；写上日期、时间会成为截止日期，不写则之后再分配" : "回车记录到今天")
+                        Text(mode == .todo ? "回车添加；写上日期、时间会成为截止日期，不写则之后再分配" : "回车记录到今天；点下面的标签可以直接记进某个笔记本")
                             .foregroundStyle(Palette.muted)
                     }
                 }
@@ -346,10 +349,11 @@ struct QuickCaptureView: View {
             message = added.task.dueDate.map { "已添加 #\(added.task.number ?? 0)，截止\($0.relativeLabel)" } ?? "已添加 #\(added.task.number ?? 0)，还没有截止日期"
         case .log:
             do {
-                let command = try store.quickLog(value, images: images, on: Date())
+                let command = try store.quickLog(value, images: images, tags: tags, on: Date())
                 guard case .entry = command else { failure = "快速记录只支持普通文字和 /note /done /block /plan。"; return }
                 let focus = store.focusTask.map { "，已关联 \(FocusHint.label($0))" } ?? ""
                 message = (images.isEmpty ? "已记录" : "已记录，含 \(images.count) 张图片") + focus
+                    + (tags.isEmpty ? "" : "，标签 " + tags.map { "#" + $0 }.joined(separator: " "))
                 images = []
                 ImageIndexer.run(store: store)
             } catch { failure = error.localizedDescription; return }

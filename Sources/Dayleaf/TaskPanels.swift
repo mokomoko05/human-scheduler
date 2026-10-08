@@ -270,7 +270,7 @@ struct AgendaView: View {
 }
 
 /// 搜索框里用方向键和回车操作结果列表；输入法组词时不拦截。
-private struct SearchKeyCatcher: NSViewRepresentable {
+struct SearchKeyCatcher: NSViewRepresentable {
     let move: (Int) -> Void
     let activate: () -> Void
 

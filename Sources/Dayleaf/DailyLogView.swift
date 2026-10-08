@@ -34,6 +34,7 @@ struct DailyLogView: View {
     let date: Date
     var collapse: (() -> Void)?
     @EnvironmentObject private var interaction: WorkspaceInteraction
+    @EnvironmentObject private var toast: ToastCenter
     @AppStorage("logReviewSplit") private var split = 0.6
     @State private var showingHelp = false
     @State private var preparingReview = false
@@ -203,20 +204,12 @@ struct DailyLogView: View {
     /// 给这条日志（包括历史日志）选择或更换关联的任务。
     private func taskPicker(for log: DailyLogEntry) -> some View {
         let logDate = editingLogDate
-        return Menu {
-            Button("不关联任务") { store.setLogTask(nil, forLog: log.id, on: logDate) }
-            Divider()
-            ForEach(store.sortedTasks().filter { !$0.task.completed || $0.id == log.taskID }) { item in
-                Button(LogTaskLabel.current(item, store: store, logDate: logDate)) {
-                    store.setLogTask(item.id, forLog: log.id, on: logDate)
-                }
-            }
-        } label: {
+        return LinkPickerButton(store: store, current: log.taskID, pick: { store.setLogTask($0, forLog: log.id, on: logDate) }) {
             Label(LogTaskLabel.saved(log, store: store, logDate: logDate).map { "关联：" + $0 } ?? "关联任务…", systemImage: "link")
                 .font(.system(size: UIScale.pt(11))).lineLimit(1)
                 .foregroundStyle(log.taskID == nil ? TerminalPalette.muted : TerminalPalette.blue)
         }
-        .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        .fixedSize()
         .help("给这条日志打上任务标签；之后可以按任务筛选")
     }
 
@@ -277,6 +270,11 @@ struct DailyLogView: View {
     /// 只保留还在当前列表里的选中项（切换日期、筛选、删除后自动去掉）。
     private var validSelection: Set<UUID> { selectedLogs.intersection(visibleLogIDs) }
 
+    private func copyLogs(_ ids: Set<UUID>) {
+        let copied = LogClipboard.copy(store: store, ids: ids)
+        toast.show(copied == 0 ? "没有可复制的文字（只有图片）" : (copied == 1 ? "已复制 1 条日志" : "已复制 \(copied) 条日志"))
+    }
+
     private func selectionState(_ id: UUID) -> LogSelection {
         LogSelection(selected: selectedLogs.contains(id), toggle: {
             if selectedLogs.contains(id) { selectedLogs.remove(id) } else { selectedLogs.insert(id) }
@@ -293,19 +291,17 @@ struct DailyLogView: View {
             }
             .buttonStyle(HitAreaButtonStyle(compact: true)).font(.system(size: UIScale.pt(11)))
             Spacer(minLength: 4)
+            Button { copyLogs(ids) } label: { Label("复制", systemImage: "doc.on.doc") }
+                .buttonStyle(HitAreaButtonStyle(compact: true)).font(.system(size: UIScale.pt(12)))
+                .disabled(ids.isEmpty).help("复制所选日志的文字（不含图片），按时间每条一行")
             Button { showingBatchTags = true } label: { Label("加标签", systemImage: "tag") }
                 .buttonStyle(HitAreaButtonStyle(compact: true)).font(.system(size: UIScale.pt(12)))
                 .disabled(ids.isEmpty || store.isReadOnly)
                 .popover(isPresented: $showingBatchTags) { LogBatchTagView(store: store, logIDs: ids) }
-            Menu {
-                Button("不关联任务") { store.setLogTask(nil, forLogs: ids) }
-                Divider()
-                ForEach(store.sortedTasks().filter { !$0.task.completed }) { item in
-                    Button(LogTaskLabel.current(item, store: store, logDate: date)) { store.setLogTask(item.id, forLogs: ids) }
-                }
-            } label: { Label("关联待办", systemImage: "link").font(.system(size: UIScale.pt(12))) }
-                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
-                .disabled(ids.isEmpty || store.isReadOnly)
+            LinkPickerButton(store: store, pick: { store.setLogTask($0, forLogs: ids) }) {
+                Label("关联待办", systemImage: "link").font(.system(size: UIScale.pt(12))).padding(.horizontal, 5).frame(height: 26).contentShape(Rectangle())
+            }
+            .fixedSize().disabled(ids.isEmpty || store.isReadOnly)
             Button("取消选择") { selectedLogs = [] }
                 .buttonStyle(HitAreaButtonStyle(compact: true)).font(.system(size: UIScale.pt(12), weight: .semibold))
                 .foregroundStyle(TerminalPalette.blue)
@@ -363,7 +359,7 @@ struct DailyLogView: View {
                         .foregroundStyle(TerminalPalette.muted).padding(.top, 8).padding(.bottom, 2)
                     ForEach(group.value) { item in
                         DailyLogRow(store: store, date: item.date, log: item.log, highlighted: editingLogID == item.log.id, next: { focused = true },
-                                    selection: selectionState(item.log.id),
+                                    selection: selectionState(item.log.id), copy: { copyLogs([$0.id]) },
                                     edit: { beginLogEdit($0, on: $1) },
                                     preview: { previewing = ImagePreviewItem(names: item.log.images, index: $0) })
                     }
@@ -379,7 +375,7 @@ struct DailyLogView: View {
                 LazyVStack(alignment: .leading, spacing: 0) {
                     ForEach(entry.logs) { log in
                         DailyLogRow(store: store, date: date, log: log, highlighted: editingLogID == log.id, next: { focused = true },
-                                    selection: selectionState(log.id),
+                                    selection: selectionState(log.id), copy: { copyLogs([$0.id]) },
                                     edit: { beginLogEdit($0, on: $1) },
                                     preview: { previewing = ImagePreviewItem(names: log.images, index: $0) })
                     }
@@ -445,15 +441,10 @@ struct DailyLogView: View {
     }
 
     private var taskMenu: some View {
-        Menu {
-            Button("不关联任务") { store.setLogTask(nil, on: date) }
-            ForEach(store.sortedTasks().filter { !$0.task.completed }) { item in
-                Button(LogTaskLabel.current(item, store: store, logDate: date)) { store.setLogTask(item.id, on: date); focused = true }
-            }
-        } label: {
+        LinkPickerButton(store: store, current: entry.logTaskID, pick: { store.setLogTask($0, on: date); focused = true }) {
             Label("关联任务", systemImage: "link")
                 .font(.system(size: UIScale.pt(11))).padding(.horizontal, 5).frame(height: 26).contentShape(Rectangle())
-        }.menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
+        }.fixedSize()
             .disabled(store.isReadOnly).help("选择任务编号，下一条日志会显示对应任务；/done 同时完成任务")
     }
 
@@ -552,6 +543,7 @@ private struct DailyLogRow: View {
     let next: () -> Void
     /// 这条是否被选中，以及点击右侧选择按钮时切换。
     let selection: LogSelection
+    let copy: (DailyLogEntry) -> Void
     let edit: (DailyLogEntry, Date) -> Void
     let preview: (Int) -> Void
     @State private var expanded = false
@@ -644,6 +636,8 @@ private struct DailyLogRow: View {
             }
             if !log.tags.isEmpty { TaskTagLine(tags: log.tags).padding(.top, 2) }
             HStack(spacing: 0) {
+                ItemActionButton(symbol: "doc.on.doc", title: log.copyText == nil ? "这条只有图片，没有文字可复制" : "复制这条日志的文字（不含图片）", compact: true) { copy(log) }
+                    .disabled(log.copyText == nil)
                 ItemActionButton(symbol: "pencil", title: "在右侧编辑这条记录", compact: true) { edit(log, date) }
                 ItemActionButton(symbol: "trash", title: "删除记录 · 可撤销", destructive: true, compact: true, action: delete)
                     .allowsHitTesting(hovered || editing)

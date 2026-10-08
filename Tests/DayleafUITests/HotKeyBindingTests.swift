@@ -24,12 +24,10 @@ final class HotKeyBindingTests: XCTestCase {
         XCTAssertEqual(Set(HotKeyAction.allCases.map(\.identifier)).count, HotKeyAction.allCases.count, "每个动作的注册标识唯一")
     }
 
-    func testNotesShortcutIsBindableDefaultsToControlNAndIsNotGlobal() {
+    func testNotesShortcutIsAGlobalBindingDefaultingToControlN() {
         let defaults = defaults()
         XCTAssertEqual(HotKeyAction.notes.defaultBinding.label, "⌃N")
-        XCTAssertFalse(HotKeyAction.notes.isGlobal, "只在应用前台生效，不抢其他应用的 ⌃N")
-        XCTAssertFalse(HotKeyAction.globalActions.contains(.notes))
-        XCTAssertEqual(Set(HotKeyAction.globalActions), [.main, .shell, .log], "快速待办不再有快捷键")
+        XCTAssertEqual(Set(HotKeyAction.allCases), [.main, .shell, .log, .notes], "笔记是全局快捷键之一；快速待办不再有快捷键")
         XCTAssertFalse(HotKeyAction.allCases.map(\.rawValue).contains("todo"))
         let custom = HotKeyBinding(keyCode: kVK_ANSI_K, modifiers: cmdKey | optionKey)
         HotKeyStore.save(custom, for: .notes, defaults: defaults)

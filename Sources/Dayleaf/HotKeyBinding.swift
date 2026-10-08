@@ -2,7 +2,7 @@ import AppKit
 import Carbon.HIToolbox
 import SwiftUI
 
-/// 可绑定的快捷键动作。`notes` 只在 Scheduler 在前台时有效（菜单快捷键），其余是全局快捷键。
+/// 全局快捷键的动作。
 enum HotKeyAction: String, CaseIterable, Identifiable {
     case main, shell, log, notes
     var id: String { rawValue }
@@ -12,7 +12,7 @@ enum HotKeyAction: String, CaseIterable, Identifiable {
         case .main: return "打开 / 隐藏 Scheduler"
         case .shell: return "打开 / 隐藏内置终端"
         case .log: return "快速写日志"
-        case .notes: return "打开 / 关闭笔记（Scheduler 在前台时）"
+        case .notes: return "打开 / 关闭笔记"
         }
     }
 
@@ -30,11 +30,6 @@ enum HotKeyAction: String, CaseIterable, Identifiable {
     }
 
     var storageKey: String { "hotkey.\(rawValue)" }
-
-    /// 全局快捷键在任何应用里都生效；其余的只在 Scheduler 在前台时生效，不会抢别的应用的按键。
-    var isGlobal: Bool { self != .notes }
-
-    static var globalActions: [HotKeyAction] { allCases.filter(\.isGlobal) }
 }
 
 /// 一个按键组合：虚拟键码加 Carbon 修饰键。

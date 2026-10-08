@@ -30,11 +30,6 @@ struct SettingsView: View {
                     Text("更大 130%").tag(1.3)
                 }
             }
-            Section("应用内快捷键") {
-                HotKeyRecorder(action: .notes)
-                Text("只在 Scheduler 在前台时生效，不会抢其他应用的按键。内置终端在前台时让给终端（⌃N 在 shell 里是下一条历史）。")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
             Section("通用") {
                 Toggle("登录时自动启动", isOn: Binding(get: { loginItem.enabled }, set: loginItem.setEnabled))
                 Picker("新建终端的布局", selection: $terminalLayout) {
@@ -43,18 +38,18 @@ struct SettingsView: View {
                 }
                 Toggle("启用全局快捷键", isOn: $globalHotKey)
                 if globalHotKey {
-                    ForEach(HotKeyAction.globalActions) { HotKeyRecorder(action: $0) }
+                    ForEach(HotKeyAction.allCases) { HotKeyRecorder(action: $0) }
                     if let failed = failedHotKeys(), !failed.isEmpty {
                         Text("「\(failed.map(\.title).joined(separator: "」「"))」的组合已被其他应用占用，请换一个。")
                             .font(.caption).foregroundStyle(Palette.deadline)
                     }
-                    Text("点组合框后直接按下想要的键（需要至少一个 ⌃ ⌥ ⌘）。在 Scheduler 或终端里再按一次就隐藏并回到刚才的应用；日志窗口里再按同一个键关闭，Tab 切换待办 / 日志（待办窗口按 Esc 关闭）。菜单栏的叶子图标也能打开快速添加待办。")
+                    Text("点组合框后直接按下想要的键（需要至少一个 ⌃ ⌥ ⌘）。在 Scheduler 或终端里再按一次就隐藏并回到刚才的应用；日志窗口里再按同一个键关闭，Tab 切换待办 / 日志（待办窗口按 Esc 关闭）；笔记窗口开着时再按一次关闭。菜单栏的叶子图标也能打开快速添加待办。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
         }
         .formStyle(.grouped)
-        .frame(width: 500, height: 660)
+        .frame(width: 500, height: 620)
     }
 }
 
