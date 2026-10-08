@@ -428,8 +428,8 @@ struct DailyLogView: View {
                     .foregroundStyle(TerminalPalette.green)
                 TaskInput(text: draft, focused: $focused, placeholder: "记录…  输入 / 查看命令，⌘V 粘贴图片", fontSize: 12, submit: submit,
                           monospaced: true, historyUp: historyUp, historyDown: historyDown, complete: completeCommand,
-                          onPasteImages: addImages)
-                    .frame(height: 24).disabled(store.isReadOnly)
+                          onPasteImages: addImages, minHeight: 24, maxLines: 10)
+                    .disabled(store.isReadOnly)
                     .accessibilityLabel("日志命令输入，回车提交")
                     .onChange(of: focused) { if $0 { interaction.activePane = .summary } }
                 taskMenu

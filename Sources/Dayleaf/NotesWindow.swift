@@ -7,17 +7,21 @@ private final class NotesWindow: QuietWindow {
     override func cancelOperation(_ sender: Any?) { close() }
 }
 
-/// 笔记窗口：可以自由调整大小的独立窗口，不再是主窗口上的 sheet。
-/// 它是主窗口的子窗口，所以主窗口隐藏（⌃⌥D）、淡出时会一起走；大小和位置会被记住。
+/// 笔记窗口：可以自由调整大小的独立窗口。它和主窗口、终端、快速记录窗口互不依赖：
+/// 各自用自己的快捷键开关，主窗口收起（⌃⌥D）时笔记照常留着；大小和位置会被记住。
 @MainActor
 final class NotesWindowController: NSObject, NSWindowDelegate {
     static let frameName = "DayleafNotesWindow"
+    /// 应用里唯一的笔记窗口：界面和全局快捷键共用同一个。
+    static let shared = NotesWindowController()
     private(set) var window: NSWindow?
+    /// 笔记关闭后，Scheduler 别的窗口（主窗口、终端）如果还开着，焦点交给它；由 AppDelegate 设置。
+    var handoffWindow: () -> NSWindow? = { nil }
 
     var isVisible: Bool { window?.isVisible == true }
 
     /// 打开笔记窗口并定位到 `taskID`；已经开着就复用同一个窗口。
-    func show(store: JournalStore, taskID: UUID?, tag: String? = nil, parent: NSWindow?,
+    func show(store: JournalStore, taskID: UUID?, tag: String? = nil,
               reveal: @escaping (UUID) -> Void, openDay: @escaping (Date) -> Void) {
         let window = self.window ?? makeWindow()
         self.window = window
@@ -28,16 +32,15 @@ final class NotesWindowController: NSObject, NSWindowDelegate {
         if let host = window.contentViewController as? NSHostingController<AnyView> {
             host.rootView = AnyView(view.id(UUID()))
         }
-        if !window.isVisible, let parent, parent.isVisible, window.parent == nil { parent.addChildWindow(window, ordered: .above) }
         window.makeKeyAndOrderFront(nil)
     }
 
     func close() { window?.close() }
 
     /// 快捷键（默认 ⌃N）：开着就关，关着就开。
-    func toggle(store: JournalStore, taskID: UUID?, parent: NSWindow?,
+    func toggle(store: JournalStore, taskID: UUID?,
                 reveal: @escaping (UUID) -> Void, openDay: @escaping (Date) -> Void) {
-        if isVisible { close() } else { show(store: store, taskID: taskID, parent: parent, reveal: reveal, openDay: openDay) }
+        if isVisible { close() } else { show(store: store, taskID: taskID, reveal: reveal, openDay: openDay) }
     }
 
     private func makeWindow() -> NSWindow {
@@ -64,8 +67,11 @@ final class NotesWindowController: NSObject, NSWindowDelegate {
         return window
     }
 
+    /// 关闭后：Scheduler 还有别的窗口开着就交给它，否则回到刚才在用的应用（和主窗口、终端的收起一致）。
     func windowWillClose(_ notification: Notification) {
-        guard let window = notification.object as? NSWindow else { return }
-        window.parent?.removeChildWindow(window)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, NSApplication.shared.isActive else { return }
+            PreviousApp.restore(handoff: handoffWindow())
+        }
     }
 }

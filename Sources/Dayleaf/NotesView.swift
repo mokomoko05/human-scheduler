@@ -494,7 +494,7 @@ struct NotesView: View {
                           fontSize: 13, submit: { submitTag(tag) }, onPasteImages: { datas in
                     tagDraftImages += ImageTools.save(datas, in: store)
                     tagFocused = true
-                }).frame(height: 24).disabled(store.isReadOnly)
+                }, minHeight: 24, maxLines: 10).disabled(store.isReadOnly)
                 LinkPickerButton(store: store, current: tagLink, pick: { tagLink = $0 }) {
                     Label(tagLink.flatMap { store.locate($0) }.map { FocusHint.label($0) } ?? "关联待办（可选）", systemImage: "link")
                         .font(.system(size: 11)).lineLimit(1).frame(maxWidth: 190)
@@ -566,7 +566,7 @@ struct NotesView: View {
                           fontSize: 13, submit: { submit(topic) }, onPasteImages: { datas in
                     draftImages += ImageTools.save(datas, in: store)
                     focused = true
-                }).frame(height: 24).disabled(topic.deleted || store.isReadOnly)
+                }, minHeight: 24, maxLines: 10).disabled(topic.deleted || store.isReadOnly)
                 Button { submit(topic) } label: { Image(systemName: "arrow.turn.down.left") }
                     .buttonStyle(HitAreaButtonStyle())
                     .disabled(topic.deleted || store.isReadOnly || (draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draftImages.isEmpty))

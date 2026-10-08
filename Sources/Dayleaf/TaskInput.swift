@@ -17,6 +17,34 @@ struct TaskInput: NSViewRepresentable {
     var complete: (() -> Void)?
     /// 设置后，粘贴图片会交给它处理（文字照常粘贴）。
     var onPasteImages: (([Data]) -> Void)?
+    /// 设置后输入框自动换行、随内容向下增高：这是单行时的高度，最多长到 `maxLines` 行。⇧回车（或 ⌥回车）换行，回车仍是提交。
+    var minHeight: CGFloat?
+    var maxLines = 10
+    /// 能不能有多行。待办标题这种单行内容为 false：粘贴进来的换行会变成空格（仍然会自动换行显示）。
+    var allowsNewlines = true
+
+    private var growing: Bool { minHeight != nil }
+
+    private var resolvedFont: NSFont {
+        monospaced ? .monospacedSystemFont(ofSize: UIScale.pt(fontSize), weight: .regular) : .systemFont(ofSize: UIScale.pt(fontSize))
+    }
+
+    /// 内容需要的高度：行数（按宽度折行）乘行高，再加上单行时上下的留白；到 `maxLines` 行为止。
+    static func height(for text: String, font: NSFont, width: CGFloat, minHeight: CGFloat, maxLines: Int) -> CGFloat {
+        let lineHeight = ceil(font.ascender - font.descender + font.leading)
+        // 以换行结尾时，最后一个空行不会被 boundingRect 计入。
+        let source = text.isEmpty ? " " : (text.hasSuffix("\n") ? text + " " : text)
+        let rect = (source as NSString).boundingRect(with: NSSize(width: max(20, width - 8), height: .greatestFiniteMagnitude),
+                                                     options: [.usesLineFragmentOrigin, .usesFontLeading], attributes: [.font: font])
+        let lines = min(CGFloat(max(1, maxLines)), max(1, ceil(rect.height / lineHeight)))
+        return lines * lineHeight + max(0, minHeight - lineHeight)
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSTextField, context: Context) -> CGSize? {
+        guard let minHeight else { return nil }
+        let width = proposal.width ?? max(nsView.bounds.width, 200)
+        return CGSize(width: width, height: Self.height(for: text, font: resolvedFont, width: width, minHeight: minHeight, maxLines: maxLines))
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
@@ -30,6 +58,13 @@ struct TaskInput: NSViewRepresentable {
             if let field { coordinator?.requestFocus(field) }
         }
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        if growing, let cell = field.cell as? NSTextFieldCell {
+            cell.wraps = true
+            cell.isScrollable = false
+            cell.usesSingleLineMode = false
+            cell.lineBreakMode = .byWordWrapping
+            field.maximumNumberOfLines = 0
+        }
         return field
     }
 
@@ -37,7 +72,7 @@ struct TaskInput: NSViewRepresentable {
         context.coordinator.parent = self
         field.appearance = NSAppearance(named: context.environment.colorScheme == .dark ? .darkAqua : .aqua)
         field.placeholderString = placeholder
-        field.font = monospaced ? .monospacedSystemFont(ofSize: UIScale.pt(fontSize), weight: .regular) : .systemFont(ofSize: UIScale.pt(fontSize))
+        field.font = resolvedFont
         field.textColor = .labelColor
         field.isEditable = enabled
         field.isSelectable = true
@@ -61,7 +96,15 @@ struct TaskInput: NSViewRepresentable {
             }
         }
         func controlTextDidChange(_ notification: Notification) {
-            if let field = notification.object as? NSTextField { parent.text = field.stringValue }
+            guard let field = notification.object as? NSTextField else { return }
+            if !parent.allowsNewlines, field.stringValue.contains(where: \.isNewline),
+               let editor = field.currentEditor() as? NSTextView {
+                // 粘贴进来的换行变成空格，光标位置不变。
+                let selection = editor.selectedRange()
+                editor.string = editor.string.components(separatedBy: .newlines).joined(separator: " ")
+                editor.setSelectedRange(selection)
+            }
+            parent.text = field.stringValue
         }
         func controlTextDidBeginEditing(_ notification: Notification) { parent.focused = true }
         func controlTextDidEndEditing(_ notification: Notification) {
@@ -74,6 +117,12 @@ struct TaskInput: NSViewRepresentable {
             if commandSelector == #selector(NSResponder.moveDown(_:)), let historyDown = parent.historyDown { historyDown(); return true }
             if commandSelector == #selector(NSResponder.insertTab(_:)), let complete = parent.complete { complete(); return true }
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                // ⇧回车 / ⌥回车：在支持多行的输入框里换行，而不是提交。
+                if parent.growing, parent.allowsNewlines,
+                   NSApp.currentEvent?.modifierFlags.intersection([.shift, .option]).isEmpty == false {
+                    textView.insertNewlineIgnoringFieldEditor(nil)
+                    return true
+                }
                 parent.text = textView.string
                 parent.submit()
                 return true

@@ -44,7 +44,7 @@ struct ContentView: View {
     @State private var showingBackups = false
     @State private var requestedEdit: UUID?
     @State private var showingMonthJumper = false
-    @State private var notesWindow = NotesWindowController()
+    private let notesWindow = NotesWindowController.shared
     /// 刻意用 @State 而不是 @StateObject：拖动时模型每秒更新几十次，ContentView 不能订阅它，否则整个界面都会跟着重绘。只有被拖的那一行和让位的行订阅。
     @State private var reorder = TaskReorderModel()
     @State private var overdueCount = 0
@@ -162,7 +162,6 @@ struct ContentView: View {
     private func showNotes(tag: String?) {
         let selected = interaction.selectedTaskID
         notesWindow.show(store: store, taskID: store.noteTopics().contains { $0.id == selected } ? selected : nil, tag: tag,
-                         parent: NSApplication.shared.keyWindow,
                          reveal: { id in reveal(date: store.locate(id)?.task.dueDate, taskID: id) },
                          openDay: { select($0) })
     }
@@ -467,7 +466,7 @@ struct ContentView: View {
                             addingTodo = false
                             requestedEdit = newest.id
                         }
-                    }).frame(height: UIScale.pt(22))
+                    }, minHeight: UIScale.pt(22), maxLines: 6, allowsNewlines: false)
                         .help("回车添加。先创建，之后再用日历按钮或拖到日历上分配截止日期；也可以直接写「明天 15:00 开会」「每周一」「提前30分钟」，加 #标签 归类。支持 [别名](https://网址)，⌘K 插入链接")
                     Button(action: addTodo) {
                         Image(systemName: "arrow.turn.down.left")

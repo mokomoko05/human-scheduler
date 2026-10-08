@@ -73,7 +73,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         focusPanel = FocusPanelController(session: focus)
         loginItem = LoginItem()
         settings = SettingsWindowController(loginItem: loginItem, failedHotKeys: { [weak self] in self?.failedHotKeys })
-        shell.handoffWindow = { [unowned self] in window.isVisible && !window.isMiniaturized ? window : nil }
+        shell.handoffWindow = { [unowned self] in otherWindowForHandoff(excludingNotes: false) }
+        NotesWindowController.shared.handoffWindow = { [unowned self] in otherWindowForHandoff(excludingNotes: true) }
         quickCapture = QuickCaptureController(store: store, openMain: { [weak self] in self?.showMainWindow() },
                                               openShell: { [weak self] in self?.shell.show() })
         UserDefaults.standard.register(defaults: [Prefs.clickExpands: true, Prefs.globalHotKey: true, Prefs.uiScale: 1.0])
@@ -162,7 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func toggleMainWindow() {
         // 只有「主窗口（或它的笔记子窗口）正是当前键盘窗口」才算在前台；终端在前台、主窗口在后面时，按键是把主窗口调上来。
         let key = NSApp.keyWindow
-        let mainIsKey = key === window || key?.parent === window
+        let mainIsKey = key === window || (key != nil && key === NotesWindowController.shared.window)
         if NSApp.isActive, mainIsKey, window.isVisible, !window.isMiniaturized {
             hideMainWindowSoftly()
         } else {
@@ -190,9 +191,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             guard let self else { return }
             window.orderOut(nil)
             WindowFade.reset(window)
-            PreviousApp.restore(handoff: shell.visibleWindow)
+            PreviousApp.restore(handoff: shell.visibleWindow ?? visibleNotesWindow)
         }
         if Motion.reduced { finish() } else { fadeWindow(to: 0, duration: 0.14, completion: finish) }
+    }
+
+    private var visibleNotesWindow: NSWindow? {
+        NotesWindowController.shared.window.flatMap { $0.isVisible && !$0.isMiniaturized ? $0 : nil }
+    }
+
+    /// 一组窗口收起后，焦点可以交给的 Scheduler 别的可见窗口：主窗口、笔记、终端各自独立，谁还开着就交给谁。
+    private func otherWindowForHandoff(excludingNotes: Bool) -> NSWindow? {
+        if window.isVisible, !window.isMiniaturized { return window }
+        return (excludingNotes ? nil : visibleNotesWindow) ?? shell.visibleWindow
     }
 
     private func fadeWindow(to alpha: CGFloat, duration: TimeInterval, completion: (() -> Void)? = nil) {
@@ -400,6 +411,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// 全局快捷键：笔记窗口开着就关；没开就打开并把 Scheduler 调到前台。Scheduler 在后台时，笔记已开着则只是调到最前面。
     private func toggleNotesGlobally() {
         let wasActive = NSApp.isActive
+        PreviousApp.remember()
         NSApp.unhide(nil)
         if !wasActive { NSApp.activate(ignoringOtherApps: true) }
         commands.send(.notesHotKey(appWasActive: wasActive))

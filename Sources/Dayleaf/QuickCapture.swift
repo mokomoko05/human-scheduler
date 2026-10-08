@@ -293,8 +293,8 @@ struct QuickCaptureView: View {
                 TaskInput(text: $text, focused: $focused,
                           placeholder: mode == .todo ? "添加待办，例如：明天 15:00 开会 #项目A" : "记录…，或 /done /block /plan 开头；⌘V 粘贴图片",
                           fontSize: 16, submit: submit, cancel: close, complete: { mode = mode == .todo ? .log : .todo },
-                          onPasteImages: mode == .log ? addImages : nil)
-                    .frame(height: 28)
+                          onPasteImages: mode == .log ? addImages : nil,
+                          minHeight: 28, maxLines: 12, allowsNewlines: mode == .log)
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(Palette.background, in: RoundedRectangle(cornerRadius: 10))
