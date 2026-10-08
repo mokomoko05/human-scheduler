@@ -156,10 +156,9 @@ struct ContentView: View {
 
     // MARK: - 命令
 
-    /// 打开笔记窗口：指定标签就定位到标签；否则选中的任务有笔记就直接定位到它，没有就打开最近有笔记的那个。
+    /// 打开笔记窗口：指定标签就定位到标签；否则保持上次关闭时的样子（任务、标签、搜索词都不变），不再跟着清单里选中的任务跳。
     private func showNotes(tag: String?) {
-        let selected = interaction.selectedTaskID
-        notesWindow.show(store: store, taskID: store.noteTopics().contains { $0.id == selected } ? selected : nil, tag: tag,
+        notesWindow.show(store: store, taskID: nil, tag: tag,
                          reveal: { id in reveal(date: store.locate(id)?.task.dueDate, taskID: id) },
                          openDay: { date in select(date); dayLogWindow.show(store: store, date: date) })
     }

@@ -15,22 +15,29 @@ final class NotesWindowController: NSObject, NSWindowDelegate {
     /// 应用里唯一的笔记窗口：界面和全局快捷键共用同一个。
     static let shared = NotesWindowController()
     private(set) var window: NSWindow?
+    /// 上次停留的位置，存进偏好；窗口关闭后视图和里面没发送的草稿也留着。
+    let nav: NotesNavigation
+
+    init(nav: NotesNavigation? = nil) {
+        self.nav = nav ?? NotesNavigation(defaults: .standard)
+        super.init()
+    }
     /// 笔记关闭后，Scheduler 别的窗口（主窗口、终端）如果还开着，焦点交给它；由 AppDelegate 设置。
     var handoffWindow: () -> NSWindow? = { nil }
 
     var isVisible: Bool { window?.isVisible == true }
 
-    /// 打开笔记窗口并定位到 `taskID`；已经开着就复用同一个窗口。
+    /// 打开笔记窗口。指定 `taskID` 或 `tag` 就跳到那里；都不指定则保持上次关闭时的样子。已经开着就复用同一个窗口。
     func show(store: JournalStore, taskID: UUID?, tag: String? = nil,
               reveal: @escaping (UUID) -> Void, openDay: @escaping (Date) -> Void) {
         let window = self.window ?? makeWindow()
         self.window = window
-        let view = NotesView(store: store, initialSelection: taskID, initialTag: tag,
+        let view = NotesView(store: store, initialSelection: taskID, initialTag: tag, nav: nav,
                              close: { [weak self] in self?.close() },
                              reveal: reveal, openDay: openDay)
-        // 每次换一个新的 id，让视图按新的任务重新初始化选中项。
+        // 不再给视图换新的 id：保持同一个视图，里面的草稿、编辑状态和滚动位置都留着。
         if let host = window.contentViewController as? NSHostingController<AnyView> {
-            host.rootView = AnyView(view.id(UUID()))
+            host.rootView = AnyView(view)
         }
         window.makeKeyAndOrderFront(nil)
     }

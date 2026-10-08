@@ -10,9 +10,8 @@ struct NotesView: View {
     let close: () -> Void
     let reveal: (UUID) -> Void
     let openDay: (Date) -> Void
-    @State private var selection: UUID?
-    @State private var tagSelection: String?
-    @State private var chapterView = true
+    /// 停在哪里（选中的任务 / 标签、搜索词、视图方式）：存进偏好，关掉再开回到原处。
+    @ObservedObject var nav: NotesNavigation
     @State private var creatingTag = false
     @State private var newTagName = ""
     @State private var newTagMessage: String?
@@ -23,23 +22,30 @@ struct NotesView: View {
     @State private var editingNoteID: UUID?
     @State private var noteEditText = ""
     @State private var noteEditFocused = false
-    @State private var query = ""
     @State private var previewing: ImagePreviewItem?
     @State private var draft = ""
     @State private var draftImages: [String] = []
     @State private var focused = false
     @State private var error: String?
 
-    init(store: JournalStore, initialSelection: UUID? = nil, initialTag: String? = nil, close: @escaping () -> Void = {},
-         reveal: @escaping (UUID) -> Void, openDay: @escaping (Date) -> Void) {
+    private var selection: UUID? { get { nav.selection } nonmutating set { nav.selection = newValue } }
+    private var tagSelection: String? { get { nav.tagSelection } nonmutating set { nav.tagSelection = newValue } }
+    private var query: String { nav.query }
+    private var chapterView: Bool { nav.chapterView }
+
+    /// 明确指定了任务或标签（比如点了待办上的标签）就跳过去；否则保持 `nav` 里上次停留的位置。
+    init(store: JournalStore, initialSelection: UUID? = nil, initialTag: String? = nil, nav: NotesNavigation? = nil,
+         close: @escaping () -> Void = {}, reveal: @escaping (UUID) -> Void, openDay: @escaping (Date) -> Void) {
         self.store = store
         self.initialSelection = initialSelection
         self.initialTag = initialTag
         self.close = close
         self.reveal = reveal
         self.openDay = openDay
-        _selection = State(initialValue: initialTag == nil ? initialSelection : nil)
-        _tagSelection = State(initialValue: initialTag)
+        let nav = nav ?? NotesNavigation()
+        self.nav = nav
+        if let initialTag { nav.open(tag: initialTag) } else if let initialSelection { nav.open(task: initialSelection) }
+        else if nav.selection == nil, nav.tagSelection == nil { nav.validate(in: store) }
     }
 
     /// 搜索词去掉开头的 `#`；以 `#` 开头（且不是 `#3` 这样的编号）表示只找标签。
@@ -77,9 +83,7 @@ struct NotesView: View {
         .background(Palette.background)
         .foregroundStyle(Palette.ink)
         .sheet(item: $previewing) { ImagePreviewSheet(store: store, item: $0) }
-        .onAppear {
-            if selection == nil, tagSelection == nil { selection = store.noteTopics().first?.id }
-        }
+        .onAppear { nav.validate(in: store) }
     }
 
     // MARK: - 左侧：有笔记的任务
@@ -96,7 +100,7 @@ struct NotesView: View {
             }
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").foregroundStyle(Palette.muted)
-                TextField("搜索任务或标签（#标签）", text: $query).textFieldStyle(.plain)
+                TextField("搜索任务或标签（#标签）", text: $nav.query).textFieldStyle(.plain)
             }
             .padding(.horizontal, 10).padding(.vertical, 6)
             .background(Palette.card, in: RoundedRectangle(cornerRadius: 7))
@@ -515,7 +519,7 @@ struct NotesView: View {
                         .font(.system(size: 12)).foregroundStyle(Palette.muted)
                 }
                 Spacer()
-                Picker("", selection: $chapterView) {
+                Picker("", selection: $nav.chapterView) {
                     Text("按待办").tag(true)
                     Text("按日期").tag(false)
                 }.pickerStyle(.segmented).labelsHidden().frame(width: 140)

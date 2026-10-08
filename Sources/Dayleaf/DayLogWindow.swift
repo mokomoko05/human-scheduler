@@ -16,7 +16,7 @@ final class DayLogWindowController: NSObject, NSWindowDelegate {
     /// 窗口大小、位置保存在偏好里的名字（测试里换成独立的名字）。
     let frameName: String
 
-    init(frameName: String = DayLogWindowController.defaultFrameName) {
+    init(frameName: String = "DayleafDayLogWindow") {
         self.frameName = frameName
         super.init()
     }
