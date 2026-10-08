@@ -81,7 +81,7 @@ struct Arguments {
 }
 
 public enum CLI {
-    public static let version = "1.0"
+    public static let version = "0.0.1"
 
     @MainActor
     public static func main() -> Int32 {
