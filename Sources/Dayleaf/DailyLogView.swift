@@ -48,7 +48,6 @@ struct DailyLogView: View {
     @State private var showingFilter = false
     @State private var editText = ""
     @State private var dropTargeted = false
-    @State private var selecting = false
     @State private var selectedLogs: Set<UUID> = []
     @State private var showingBatchTags = false
 
@@ -84,6 +83,8 @@ struct DailyLogView: View {
         .contentShape(Rectangle())
         .simultaneousGesture(TapGesture().onEnded { interaction.activePane = .summary })
         .onChange(of: interaction.logFocusRequest) { _ in focused = true }
+        .onChange(of: date) { _ in selectedLogs = [] }
+        .onChange(of: interaction.logFilter) { _ in selectedLogs = [] }
         .sheet(isPresented: $preparingReview) {
             ReviewDraftView(store: store, date: date)
         }
@@ -98,12 +99,6 @@ struct DailyLogView: View {
                 Image(systemName: "terminal").foregroundStyle(TerminalPalette.green)
                 Text("\(filtering ? filteredLogs.count : entry.logs.count)").font(.system(size: UIScale.pt(11), design: .monospaced)).foregroundStyle(TerminalPalette.muted)
                 Spacer(minLength: 4)
-                Button { toggleSelecting() } label: {
-                    Image(systemName: selecting ? "checkmark.circle.fill" : "checkmark.circle")
-                        .foregroundStyle(selecting ? TerminalPalette.blue : TerminalPalette.text)
-                }
-                .buttonStyle(HitAreaButtonStyle(compact: true)).help("多选日志：批量加标签、关联待办")
-                .accessibilityLabel(selecting ? "退出多选" : "多选日志")
                 Button { showingFilter = true } label: {
                     Image(systemName: filtering ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
                         .foregroundStyle(filtering ? TerminalPalette.blue : TerminalPalette.text)
@@ -119,7 +114,8 @@ struct DailyLogView: View {
             }
             if filtering { filterBar }
             stream
-            if selecting { batchBar } else { input }
+            if !validSelection.isEmpty { batchBar }
+            input
         }
         .overlay {
             if dropTargeted {
@@ -281,23 +277,17 @@ struct DailyLogView: View {
     /// 只保留还在当前列表里的选中项（切换日期、筛选、删除后自动去掉）。
     private var validSelection: Set<UUID> { selectedLogs.intersection(visibleLogIDs) }
 
-    private func selectionState(_ id: UUID) -> LogSelection? {
-        selecting ? LogSelection(selected: selectedLogs.contains(id), toggle: {
+    private func selectionState(_ id: UUID) -> LogSelection {
+        LogSelection(selected: selectedLogs.contains(id), toggle: {
             if selectedLogs.contains(id) { selectedLogs.remove(id) } else { selectedLogs.insert(id) }
-        }) : nil
-    }
-
-    private func toggleSelecting() {
-        NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
-        selecting.toggle()
-        selectedLogs = []
+        })
     }
 
     private var batchBar: some View {
         let ids = validSelection
         let all = visibleLogIDs
         return HStack(spacing: 8) {
-            Text("已选 \(ids.count) 条").font(.system(size: UIScale.pt(11), design: .monospaced)).foregroundStyle(TerminalPalette.muted)
+            Text("已选 \(ids.count) / \(all.count) 条").font(.system(size: UIScale.pt(11), design: .monospaced)).foregroundStyle(TerminalPalette.muted)
             Button(ids.count == all.count && !all.isEmpty ? "全不选" : "全选") {
                 selectedLogs = ids.count == all.count ? [] : Set(all)
             }
@@ -316,7 +306,7 @@ struct DailyLogView: View {
             } label: { Label("关联待办", systemImage: "link").font(.system(size: UIScale.pt(12))) }
                 .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize()
                 .disabled(ids.isEmpty || store.isReadOnly)
-            Button("完成") { toggleSelecting() }
+            Button("取消选择") { selectedLogs = [] }
                 .buttonStyle(HitAreaButtonStyle(compact: true)).font(.system(size: UIScale.pt(12), weight: .semibold))
                 .foregroundStyle(TerminalPalette.blue)
         }
@@ -560,8 +550,8 @@ private struct DailyLogRow: View {
     let log: DailyLogEntry
     let highlighted: Bool
     let next: () -> Void
-    /// 多选模式下才有：这条是否被选中，以及点击时切换。
-    var selection: LogSelection?
+    /// 这条是否被选中，以及点击右侧选择按钮时切换。
+    let selection: LogSelection
     let edit: (DailyLogEntry, Date) -> Void
     let preview: (Int) -> Void
     @State private var expanded = false
@@ -603,11 +593,6 @@ private struct DailyLogRow: View {
 
     private var line: some View {
         HStack(alignment: .top, spacing: 3) {
-            if let selection {
-                Image(systemName: selection.selected ? "checkmark.square.fill" : "square")
-                    .foregroundStyle(selection.selected ? TerminalPalette.blue : TerminalPalette.muted)
-                    .frame(width: 18, height: 22).accessibilityHidden(true)
-            }
             Text(timestamp).foregroundStyle(color)
                 .font(.system(size: UIScale.pt(11), design: .monospaced)).padding(.top, 1)
                 .fixedSize()
@@ -666,18 +651,19 @@ private struct DailyLogRow: View {
             .fixedSize()
             .opacity(hovered || editing ? 1 : 0.18)
             .disabled(store.isReadOnly)
+            Button(action: selection.toggle) {
+                Image(systemName: selection.selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: UIScale.pt(13)))
+                    .frame(width: 22, height: 22).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(selection.selected ? TerminalPalette.blue : TerminalPalette.muted)
+            .help(selection.selected ? "取消选中" : "选中这条日志，可批量加标签、关联待办")
+            .accessibilityLabel(selection.selected ? "取消选中这条日志" : "选中这条日志")
         }
         .frame(minHeight: 22, alignment: .top)
-        .background(highlighted || selection?.selected == true ? TerminalPalette.blue.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 3))
+        .background(highlighted || selection.selected ? TerminalPalette.blue.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 3))
         .contentShape(Rectangle())
-        .overlay {
-            // 多选模式下整行点一下就切换选中，盖住行内的链接、按钮。
-            if let selection {
-                Color.clear.contentShape(Rectangle()).onTapGesture(perform: selection.toggle)
-                    .accessibilityElement().accessibilityLabel(selection.selected ? "已选中，点击取消" : "点击选中")
-                    .accessibilityAddTraits(.isButton)
-            }
-        }
         .onContinuousHover { phase in
             switch phase {
             case .active: hovered = true
