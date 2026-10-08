@@ -173,6 +173,8 @@ private struct JournalDocument: Codable {
     var nextTaskNumber: Int?
     /// 标签注册表：显式创建的标签（可以是还没有任何内容的空标签）。用过的标签不需要在这里。
     var tags: [String]?
+    /// 固定关联的待办（不计时）：没有明确指定、也不在专注计时时，新日志记到它名下。
+    var pinnedTask: UUID?
 }
 
 @MainActor
@@ -187,6 +189,8 @@ public final class JournalStore: ObservableObject {
     @Published public private(set) var focusTaskID: UUID?
     /// 显式创建的标签，包括还没有内容的空标签。
     @Published public internal(set) var tagRegistry: [String] = []
+    /// 固定关联的待办（不计时）。读 `pinnedTask` 才会排除已删除、已完成的。
+    @Published public internal(set) var pinnedTaskID: UUID?
     public let directory: URL
     @Published public private(set) var hasPendingSave = false
     private var pendingSave: Task<Void, Never>?
@@ -223,6 +227,7 @@ public final class JournalStore: ObservableObject {
                 }
                 days = document.days
                 tagRegistry = TagText.merge([], (document.tags ?? []).compactMap(TagText.normalize))
+                pinnedTaskID = document.pinnedTask
                 if !readOnlySnapshot { try data.write(to: backupURL, options: .atomic) }
                 nextTaskNumber = max(document.nextTaskNumber ?? 1, (days.values.flatMap(\.todos).compactMap(\.number).max() ?? 0) + 1)
                 if document.version < 6 {
@@ -485,7 +490,7 @@ public final class JournalStore: ObservableObject {
         // 明确指定的任务（正文里的 #N、手动选的关联）优先；都没有时，专注中的任务兜底。
         let explicit = inline ?? entry.logTaskID.flatMap(locate)
         if inline == nil, entry.logTaskID != nil, explicit == nil { throw LogInputError.missingTask }
-        let linked = explicit ?? focusTask
+        let linked = explicit ?? defaultLinkTask
         let title = linked.map { String(TaskText.rendered($0.task.title).characters) }
         // 只有明确指定的任务才会在空正文时借用标题，/done 也只完成明确指定的任务；专注兜底的关联不会替用户完成任务。
         let text = body.isEmpty ? (explicit != nil ? title ?? "" : "") : body
@@ -647,30 +652,68 @@ public final class JournalStore: ObservableObject {
     /// 专注中的任务；任务已被删除时为 nil（日志照常记录，只是不再关联）。
     public var focusTask: ScheduledTask? { focusTaskID.flatMap(locate) }
 
+    /// 固定关联的待办（不计时的「当前待办」）。已完成、已删除的不算。
+    public var pinnedTask: ScheduledTask? { pinnedTaskID.flatMap(locate).flatMap { $0.task.completed ? nil : $0 } }
+
+    /// 没有明确指定任务时，新日志默认记到哪：专注中的任务优先，其次是固定关联的。
+    public var defaultLinkTask: ScheduledTask? { focusTask ?? pinnedTask }
+
+    /// 固定 / 取消固定一个待办。只有未完成的待办能固定；返回是否生效。固定不进撤销栈。
+    @discardableResult
+    public func pinTask(_ id: UUID?) -> Bool {
+        guard !isReadOnly else { return false }
+        if let id {
+            guard let located = locate(id), !located.task.completed else { return false }
+            guard pinnedTaskID != id else { return true }
+            pinnedTaskID = id
+        } else {
+            guard pinnedTaskID != nil else { return true }
+            pinnedTaskID = nil
+        }
+        registryChanged()
+        return true
+    }
+
     /// 某个任务的笔记：关联到它的日志，不含专注计时记录，按时间从早到晚。
     public func notes(for taskID: UUID) -> [LoggedLog] {
         logs(linkedTo: [taskID]).filter { !$0.log.focus }
     }
 
     /// 全局快速记录：不经过当天的输入草稿，直接追加一条日志。
+    /// 关联哪个待办：明确传入的 `taskID` > 正文开头写的 `#N` > （`linkDefault` 为 true 时）专注中的 / 固定关联的待办。
+    /// `linkDefault: false` 表示明确要「不关联」，比如在笔记本里写一条直接记录。
     @discardableResult
-    public func quickLog(_ text: String, images: [String] = [], taskID: UUID? = nil, tags: [String] = [], on date: Date, now: Date = Date()) throws -> LogCommand {
+    public func quickLog(_ text: String, images: [String] = [], taskID: UUID? = nil, linkDefault: Bool = true, tags: [String] = [], on date: Date, now: Date = Date()) throws -> LogCommand {
+        try quickLogEntry(text, images: images, taskID: taskID, linkDefault: linkDefault, tags: tags, on: date, now: now).command
+    }
+
+    /// 同 `quickLog`，同时返回写入的那条日志（命令不是普通记录时为 nil），界面据此告诉用户最终关联到了哪个待办。
+    @discardableResult
+    public func quickLogEntry(_ text: String, images: [String] = [], taskID: UUID? = nil, linkDefault: Bool = true, tags: [String] = [], on date: Date, now: Date = Date()) throws -> (command: LogCommand, entry: DailyLogEntry?) {
         guard !isReadOnly else { throw LogInputError.readOnly }
         let command = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !images.isEmpty
             ? LogCommand.entry(.note, "") : try LogCommand.parse(text)
-        guard case let .entry(kind, body) = command else { return command }
+        guard case .entry(let kind, var body) = command else { return (command, nil) }
+        // 没有明确传入任务时，开头的 #N 指向第 N 号任务（后面没有内容时当作普通文字，不吞掉）。
+        var inline: ScheduledTask?
+        let split = LogCommand.splitTaskReference(body)
+        if taskID == nil, let number = split.number, !split.rest.isEmpty, let located = locate(number: number) {
+            inline = located
+            body = split.rest
+        }
         guard !body.isEmpty || !images.isEmpty else { throw LogInputError.empty }
         var updated = days
         let key = JournalDates.key(date)
         var entry = updated[key] ?? DayEntry()
-        let linked = taskID.flatMap(locate) ?? focusTask
-        entry.logs.append(DailyLogEntry(createdAt: now, kind: kind, text: body,
-                                        taskID: linked?.id, taskTitle: linked.map { String(TaskText.rendered($0.task.title).characters) },
-                                        taskNumber: linked?.task.number, taskTags: linked?.task.tags ?? [],
-                                        tags: TagText.merge([], tags.compactMap(TagText.normalize)), images: images))
+        let linked = taskID.flatMap(locate) ?? inline ?? (linkDefault ? defaultLinkTask : nil)
+        let created = DailyLogEntry(createdAt: now, kind: kind, text: body,
+                                    taskID: linked?.id, taskTitle: linked.map { String(TaskText.rendered($0.task.title).characters) },
+                                    taskNumber: linked?.task.number, taskTags: linked?.task.tags ?? [],
+                                    tags: TagText.merge([], tags.compactMap(TagText.normalize)), images: images)
+        entry.logs.append(created)
         updated[key] = entry
         replaceDays(updated, action: "添加日志")
-        return command
+        return (command, created)
     }
 
     /// 截止日期早于 `date` 且未完成的任务数量。
@@ -910,7 +953,7 @@ public final class JournalStore: ObservableObject {
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try encoder.encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber, tags: tagRegistry.isEmpty ? nil : tagRegistry))
+            let data = try encoder.encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber, tags: tagRegistry.isEmpty ? nil : tagRegistry, pinnedTask: pinnedTaskID))
             try makeDailyBackup(data)
             try data.write(to: fileURL, options: .atomic)
             lastSaved = Date()
@@ -924,7 +967,7 @@ public final class JournalStore: ObservableObject {
     public func export(to url: URL) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try encoder.encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber, tags: tagRegistry.isEmpty ? nil : tagRegistry)).write(to: url, options: .atomic)
+        try encoder.encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber, tags: tagRegistry.isEmpty ? nil : tagRegistry, pinnedTask: pinnedTaskID)).write(to: url, options: .atomic)
     }
 
     public func tasks(matching query: String = "", filter: AgendaFilter = .all, now: Date = Date()) -> [ScheduledTask] {
@@ -957,6 +1000,8 @@ public final class JournalStore: ObservableObject {
     private func invalidateTaskIndex() {
         indexedTasks = nil
         indexedDeadlines = nil
+        // 固定关联的待办完成或删除后，固定自动取消（之后即使撤销完成，也不会悄悄恢复）。
+        if let pinnedTaskID, locate(pinnedTaskID).map({ $0.task.completed }) != false { self.pinnedTaskID = nil }
     }
 
     public func locate(_ id: UUID) -> ScheduledTask? {
@@ -1095,7 +1140,7 @@ public final class JournalStore: ObservableObject {
         let document = try readBackup(url)
         try FileManager.default.createDirectory(at: backupsDirectory, withIntermediateDirectories: true)
         let current = isReadOnly && FileManager.default.fileExists(atPath: fileURL.path)
-            ? try Data(contentsOf: fileURL) : try JSONEncoder().encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber, tags: tagRegistry.isEmpty ? nil : tagRegistry))
+            ? try Data(contentsOf: fileURL) : try JSONEncoder().encode(JournalDocument(days: days, nextTaskNumber: nextTaskNumber, tags: tagRegistry.isEmpty ? nil : tagRegistry, pinnedTask: pinnedTaskID))
         let recovery = backupsDirectory.appendingPathComponent("before-restore-\(JournalDates.key(Date()))-\(UUID().uuidString).json")
         try current.write(to: recovery, options: .atomic)
         isReadOnly = false

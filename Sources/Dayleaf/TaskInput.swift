@@ -22,6 +22,8 @@ struct TaskInput: NSViewRepresentable {
     var maxLines = 10
     /// 能不能有多行。待办标题这种单行内容为 false：粘贴进来的换行会变成空格（仍然会自动换行显示）。
     var allowsNewlines = true
+    /// 设置后，在开头或空白之后输入 `@` 会弹出待办候选（见 `MentionList`）：↑ ↓ 选择，回车 / Tab 确认，Esc 只关掉候选。
+    var mention: MentionState?
 
     private var growing: Bool { minHeight != nil }
 
@@ -54,6 +56,7 @@ struct TaskInput: NSViewRepresentable {
         field.drawsBackground = false
         field.focusRingType = .none
         field.delegate = context.coordinator
+        context.coordinator.field = field
         field.onAttach = { [weak field, weak coordinator = context.coordinator] in
             if let field { coordinator?.requestFocus(field) }
         }
@@ -70,6 +73,7 @@ struct TaskInput: NSViewRepresentable {
 
     func updateNSView(_ field: NSTextField, context: Context) {
         context.coordinator.parent = self
+        context.coordinator.bindMention()
         field.appearance = NSAppearance(named: context.environment.colorScheme == .dark ? .darkAqua : .aqua)
         field.placeholderString = placeholder
         field.font = resolvedFont
@@ -83,10 +87,43 @@ struct TaskInput: NSViewRepresentable {
         context.coordinator.focusRequested = wantsFocus
     }
 
+    @MainActor
     final class Coordinator: NSObject, NSTextFieldDelegate {
         var parent: TaskInput
         var focusRequested = false
+        weak var field: NSTextField?
+        private var selectionObserver: NSObjectProtocol?
         init(_ parent: TaskInput) { self.parent = parent }
+        deinit { if let selectionObserver { NotificationCenter.default.removeObserver(selectionObserver) } }
+
+        func bindMention() {
+            parent.mention?.acceptAction = { [weak self] in self?.acceptMention() ?? false }
+        }
+
+        /// 光标所在位置有没有 `@xxx`：有就更新候选。
+        func refreshMention() {
+            guard let mention = parent.mention else { return }
+            guard let editor = field?.currentEditor() as? NSTextView else { mention.update(nil); return }
+            let selected = editor.selectedRange()
+            mention.update(selected.length == 0 ? MentionToken.find(in: editor.string, caret: selected.location) : nil)
+        }
+
+        /// 选定候选：把 `@xxx` 从输入框里删掉，交给调用方去关联。输入框没有焦点（比如点的是列表）时直接改绑定的文字。
+        @discardableResult
+        func acceptMention() -> Bool {
+            guard let mention = parent.mention, let (token, id) = mention.take() else { return false }
+            if let editor = field?.currentEditor() as? NSTextView,
+               NSMaxRange(token.range) <= (editor.string as NSString).length {
+                editor.insertText("", replacementRange: token.range)
+                parent.text = editor.string
+            } else {
+                let ns = parent.text as NSString
+                if NSMaxRange(token.range) <= ns.length { parent.text = ns.replacingCharacters(in: token.range, with: "") }
+            }
+            mention.onPick(id)
+            parent.focused = true
+            return true
+        }
         func requestFocus(_ field: NSTextField) {
             DispatchQueue.main.async { [weak self, weak field] in
                 guard let self, let field, field.isEditable, self.parent.focused,
@@ -105,14 +142,41 @@ struct TaskInput: NSViewRepresentable {
                 editor.setSelectedRange(selection)
             }
             parent.text = field.stringValue
+            refreshMention()
         }
-        func controlTextDidBeginEditing(_ notification: Notification) { parent.focused = true }
+        func controlTextDidBeginEditing(_ notification: Notification) {
+            parent.focused = true
+            guard parent.mention != nil, let editor = notification.userInfo?["NSFieldEditor"] as? NSTextView else { return }
+            if let selectionObserver { NotificationCenter.default.removeObserver(selectionObserver) }
+            // 光标挪到 `@xxx` 外面（方向键、鼠标点击）时，候选也要收起来。
+            selectionObserver = NotificationCenter.default.addObserver(forName: NSTextView.didChangeSelectionNotification, object: editor, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.refreshMention() }
+            }
+        }
         func controlTextDidEndEditing(_ notification: Notification) {
             focusRequested = false
             parent.focused = false
+            if let selectionObserver { NotificationCenter.default.removeObserver(selectionObserver) }
+            selectionObserver = nil
+            // 稍等一下再收：点候选列表时输入框会先失去焦点，立刻收掉就点不到了。
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: 300_000_000)
+                guard let self, self.field?.currentEditor() == nil else { return }
+                self.parent.mention?.update(nil)
+            }
         }
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             guard !textView.hasMarkedText() else { return false }
+            if let mention = parent.mention, mention.isActive {
+                switch commandSelector {
+                case #selector(NSResponder.moveUp(_:)): mention.move(-1); return true
+                case #selector(NSResponder.moveDown(_:)): mention.move(1); return true
+                case #selector(NSResponder.insertNewline(_:)), #selector(NSResponder.insertTab(_:)):
+                    if acceptMention() { return true }
+                case #selector(NSResponder.cancelOperation(_:)): mention.dismiss(); return true
+                default: break
+                }
+            }
             if commandSelector == #selector(NSResponder.moveUp(_:)), let historyUp = parent.historyUp { historyUp(); return true }
             if commandSelector == #selector(NSResponder.moveDown(_:)), let historyDown = parent.historyDown { historyDown(); return true }
             if commandSelector == #selector(NSResponder.insertTab(_:)), let complete = parent.complete { complete(); return true }

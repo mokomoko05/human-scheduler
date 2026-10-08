@@ -78,17 +78,22 @@ final class QuickCaptureModel: ObservableObject {
     @Published var text = ""
     @Published var images: [String] = []
     @Published var tags: [String] = []
+    /// 这条日志明确关联的待办（`@` 选的，或用选择器选的）；`unlinked` 表示明确不关联。都没有时按专注 / 固定关联自动处理。
+    @Published var link: UUID?
+    @Published var unlinked = false
     /// 标签栏里「新标签」输入框里写了一半的字。
     @Published var pendingTag = ""
 
     var hasDraft: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty || !tags.isEmpty
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty || !tags.isEmpty || link != nil
     }
 
     func clearDraft() {
         text = ""
         images = []
         tags = []
+        link = nil
+        unlinked = false
         pendingTag = ""
     }
 }
@@ -274,6 +279,7 @@ struct QuickCaptureView: View {
     @ObservedObject var model: QuickCaptureModel
     let close: () -> Void
     let resize: (CGFloat) -> Void
+    @StateObject private var mention = MentionState()
     @State private var restored = false
     @State private var focused = true
     @State private var message: String?
@@ -310,19 +316,23 @@ struct QuickCaptureView: View {
             HStack(spacing: 8) {
                 Image(systemName: mode == .todo ? "plus.circle" : "chevron.right.2").foregroundStyle(Palette.accent)
                 TaskInput(text: $model.text, focused: $focused,
-                          placeholder: mode == .todo ? "添加待办，例如：明天 15:00 开会 #项目A" : "记录…，或 /done /block /plan 开头；⌘V 粘贴图片",
+                          placeholder: mode == .todo ? "添加待办，例如：明天 15:00 开会 #项目A" : "记录…  @ 关联待办 · /done /block /plan 开头 · ⌘V 粘贴图片",
                           fontSize: 16, submit: submit, cancel: close, complete: { mode = mode == .todo ? .log : .todo },
                           onPasteImages: mode == .log ? addImages : nil,
-                          minHeight: 28, maxLines: 12, allowsNewlines: mode == .log)
+                          minHeight: 28, maxLines: 12, allowsNewlines: mode == .log, mention: mode == .log ? mention : nil)
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(Palette.background, in: RoundedRectangle(cornerRadius: 10))
+            if mode == .log { MentionList(state: mention, store: store, contextTags: model.tags) }
             if mode == .log, !images.isEmpty {
                 PendingImagesStrip(store: store, names: images,
                                    remove: { name in images.removeAll { $0 == name } },
                                    preview: { NSWorkspace.shared.open(store.imageURL(images[$0])) })
             }
-            if mode == .log { TagSelectionBar(store: store, selection: $model.tags, draftBinding: $model.pendingTag) }
+            if mode == .log {
+                LogLinkBar(store: store, link: $model.link, unlinked: $model.unlinked, contextTags: model.tags)
+                TagSelectionBar(store: store, selection: $model.tags, draftBinding: $model.pendingTag)
+            }
             Group {
                 if let message {
                     Label(message, systemImage: "checkmark.circle.fill").foregroundStyle(Palette.success)
@@ -337,12 +347,8 @@ struct QuickCaptureView: View {
                 } else if mode == .todo, parsed.hasSchedule || !parsed.tags.isEmpty {
                     ParsedChips(parsed: parsed)
                 } else {
-                    if mode == .log, let task = store.focusTask {
-                        Label("专注中：这条日志会关联到 \(FocusHint.label(task))", systemImage: "timer").foregroundStyle(Palette.success).lineLimit(1)
-                    } else {
-                        Text(mode == .todo ? "回车添加；写上日期、时间会成为截止日期，不写则之后再分配" : "回车记录到今天；点下面的标签可以直接记进某个笔记本")
-                            .foregroundStyle(Palette.muted)
-                    }
+                    Text(mode == .todo ? "回车添加；写上日期、时间会成为截止日期，不写则之后再分配" : "回车记录到今天；点下面的标签可以直接记进某个笔记本")
+                        .foregroundStyle(Palette.muted)
                 }
             }.font(.system(size: UIScale.pt(12))).frame(height: 20, alignment: .leading)
         }
@@ -357,7 +363,11 @@ struct QuickCaptureView: View {
         .onPreferenceChange(PanelHeightKey.self) { resize($0) }
         .onChange(of: mode) { _ in failure = nil; focused = true }
         .onChange(of: model.text) { _ in restored = false }
-        .onAppear { restored = model.hasDraft }
+        .onAppear {
+            restored = model.hasDraft
+            mention.provider = { [store, model] query in store.linkCandidates(query: query, contextTags: model.tags) }
+            mention.onPick = { [model] id in model.link = id; model.unlinked = false }
+        }
     }
 
     private func addImages(_ datas: [Data]) {
@@ -376,13 +386,15 @@ struct QuickCaptureView: View {
             message = added.task.dueDate.map { "已添加 #\(added.task.number ?? 0)，截止\($0.relativeLabel)" } ?? "已添加 #\(added.task.number ?? 0)，还没有截止日期"
         case .log:
             do {
-                let command = try store.quickLog(value, images: images, tags: tags, on: Date())
-                guard case .entry = command else { failure = "快速记录只支持普通文字和 /note /done /block /plan。"; return }
-                let focus = store.focusTask.map { "，已关联 \(FocusHint.label($0))" } ?? ""
-                message = (images.isEmpty ? "已记录" : "已记录，含 \(images.count) 张图片") + focus
+                let result = try store.quickLogEntry(value, images: images, taskID: model.link, linkDefault: !model.unlinked, tags: tags, on: Date())
+                guard case .entry = result.command else { failure = "快速记录只支持普通文字和 /note /done /block /plan。"; return }
+                let linked = result.entry.flatMap(FocusHint.label(of:)).map { "，已关联 " + $0 } ?? ""
+                message = (images.isEmpty ? "已记录" : "已记录，含 \(images.count) 张图片") + linked
                     + (tags.isEmpty ? "" : "，标签 " + tags.map { "#" + $0 }.joined(separator: " "))
                 images = []
                 tags = []
+                model.link = nil
+                model.unlinked = false
                 model.pendingTag = ""
                 ImageIndexer.run(store: store)
             } catch { failure = error.localizedDescription; return }
@@ -433,6 +445,14 @@ private struct PanelHeightKey: PreferenceKey {
 }
 
 enum FocusHint {
+    /// 一条日志关联的待办：「#3 读论文」；没有关联为 nil。
+    static func label(of log: DailyLogEntry) -> String? {
+        guard let title = log.taskTitle else { return nil }
+        let short = title.count > 24 ? String(title.prefix(24)) + "…" : title
+        let prefix: String = log.taskNumber.map { "#\($0) " } ?? ""
+        return prefix + short
+    }
+
     /// 「#3 读论文」；任务标题太长时截断。
     static func label(_ task: ScheduledTask) -> String {
         let title = String(TaskText.rendered(task.task.title).characters)

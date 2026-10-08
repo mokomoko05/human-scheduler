@@ -6,8 +6,10 @@ struct NoteDraft: Equatable {
     var text = ""
     var images: [String] = []
     var link: UUID?
+    /// 明确选了「不关联」（专注中 / 固定关联时，默认会自动关联）。
+    var unlinked = false
 
-    var isEmpty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty && link == nil }
+    var isEmpty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty && link == nil && !unlinked }
 }
 
 /// 笔记窗口停在哪里：选中的任务或标签、搜索词、标签页按待办还是按日期看。
@@ -21,11 +23,24 @@ final class NotesNavigation: ObservableObject {
     @Published var tagSelection: String? { didSet { save() } }
     @Published var query: String { didSet { save() } }
     @Published var chapterView: Bool { didSet { save() } }
+    /// 标签页右侧的目录（章节列表）显示与否。
+    @Published var showOutline: Bool { didSet { save() } }
+    /// 折叠起来的章节（只在应用运行期间保留）：`标签|章节` 的键。
+    @Published var collapsed: Set<String> = []
     /// 每个任务、每个标签各有一份没发送的草稿（只在应用运行期间保留）：切到别处、关掉窗口、去别的应用复制东西，回来都还在。
     @Published private(set) var drafts: [String: NoteDraft] = [:]
 
     static func draftKey(task id: UUID) -> String { "task:" + id.uuidString }
     static func draftKey(tag: String) -> String { "tag:" + TagText.key(tag) }
+
+    static func collapseKey(tag: String, chapter: String) -> String { TagText.key(tag) + "|" + chapter }
+
+    func isCollapsed(tag: String, chapter: String) -> Bool { collapsed.contains(Self.collapseKey(tag: tag, chapter: chapter)) }
+
+    func setCollapsed(_ value: Bool, tag: String, chapter: String) {
+        let key = Self.collapseKey(tag: tag, chapter: chapter)
+        if value { collapsed.insert(key) } else { collapsed.remove(key) }
+    }
 
     func draft(_ key: String) -> NoteDraft { drafts[key] ?? NoteDraft() }
 
@@ -45,6 +60,7 @@ final class NotesNavigation: ObservableObject {
         tagSelection = defaults?.string(forKey: prefix + ".tag")
         query = defaults?.string(forKey: prefix + ".query") ?? ""
         chapterView = defaults?.object(forKey: prefix + ".chapters") as? Bool ?? true
+        showOutline = defaults?.object(forKey: prefix + ".outline") as? Bool ?? true
     }
 
     private func save() {
@@ -53,6 +69,7 @@ final class NotesNavigation: ObservableObject {
         defaults.set(tagSelection, forKey: prefix + ".tag")
         defaults.set(query, forKey: prefix + ".query")
         defaults.set(chapterView, forKey: prefix + ".chapters")
+        defaults.set(showOutline, forKey: prefix + ".outline")
     }
 
     func open(task id: UUID) { tagSelection = nil; selection = id }

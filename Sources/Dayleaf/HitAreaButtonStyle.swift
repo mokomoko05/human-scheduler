@@ -6,6 +6,8 @@ struct ItemActionButton: View {
     var destructive = false
     var compact = false
     var showsTitle = false
+    /// 开着的开关（比如已固定）：用强调色。
+    var active = false
     let action: () -> Void
 
     var body: some View {
@@ -16,7 +18,7 @@ struct ItemActionButton: View {
             }.font(.system(size: UIScale.pt(11)))
         }
         .buttonStyle(HitAreaButtonStyle(compact: compact))
-        .foregroundStyle(destructive ? Palette.deadline : Palette.muted)
+        .foregroundStyle(destructive ? Palette.deadline : (active ? Palette.accent : Palette.muted))
         .help(title)
         .accessibilityLabel(title)
     }

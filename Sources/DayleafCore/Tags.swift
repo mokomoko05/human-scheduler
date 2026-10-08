@@ -227,38 +227,97 @@ extension JournalStore {
         return parts.isEmpty ? nil : parts.joined(separator: "\n")
     }
 
-    /// 「关联待办」的候选：专注中的在最前，其次是最近被日志关联过的，再是其余的按清单顺序；`query` 按标题、编号（`3` 或 `#3`）、标签筛选。
-    public func linkCandidates(query: String = "", includeCompleted: Bool = false, recentLimit: Int = 8) -> [ScheduledTask] {
-        var pool = sortedTasks().filter { includeCompleted || !$0.task.completed }
+    /// 「关联待办」的候选（`@` 补全和选择器共用）。`query` 可以是标题里的字、编号（`3` / `#3`）、`#标签`、拼音（`lunwen`）或拼音首字母（`lw`），
+    /// 也容忍中间漏字（`读文` 能找到「读论文」）。排序是「猜你要写哪个」：编号精确命中最前；然后专注中的、固定关联的、
+    /// 带 `contextTags`（比如正在写的标签）的、最近记过的；其余按清单顺序。字面匹配好的排在只能模糊匹配的前面。
+    public func linkCandidates(query: String = "", includeCompleted: Bool = false, recentLimit: Int = 8, contextTags: [String] = []) -> [ScheduledTask] {
+        let pool = sortedTasks().filter { includeCompleted || !$0.task.completed }
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            let digits = trimmed.hasPrefix("#") ? String(trimmed.dropFirst()) : trimmed
-            let number = Int(digits)
-            let tag = TagText.searchTag(trimmed)
-            pool = pool.filter { item in
-                if let number, item.task.number == number { return true }
-                if let tag { return item.task.tags.contains { TagText.matches($0, query: tag) } }
-                let title = String(TaskText.rendered(item.task.title, alias: item.task.calendarName).characters)
-                return title.localizedStandardContains(trimmed) || item.task.title.localizedStandardContains(trimmed)
-                    || item.task.tags.contains { $0.localizedStandardContains(trimmed) }
-            }
+        let digits = trimmed.hasPrefix("#") ? String(trimmed.dropFirst()) : trimmed
+        let number = Int(digits)
+        // 每个任务的匹配质量；nil 表示不匹配。
+        var quality: [UUID: Int] = [:]
+        for item in pool {
+            if trimmed.isEmpty { quality[item.id] = 1; continue }
+            if let value = LinkMatcher.quality(of: item, query: trimmed, number: number) { quality[item.id] = value }
         }
-        // 没有查询词时才按「专注中 / 最近」排前面；有查询词时，匹配的按同样的次序，编号精确命中的在最前。
+        let matched = pool.filter { quality[$0.id] != nil }
         var latest: [UUID: Date] = [:]
         for day in days.values { for log in day.logs where !log.focus { if let id = log.taskID { latest[id] = max(latest[id] ?? .distantPast, log.createdAt) } } }
         let recent = Set(latest.sorted { $0.value > $1.value }.prefix(recentLimit).map(\.key))
         let order = Dictionary(uniqueKeysWithValues: pool.enumerated().map { ($1.id, $0) })
-        func rank(_ item: ScheduledTask) -> Int {
-            if let number = Int(trimmed.hasPrefix("#") ? String(trimmed.dropFirst()) : trimmed), item.task.number == number { return 0 }
-            if item.id == focusTaskID { return 1 }
-            return recent.contains(item.id) ? 2 : 3
+        let pinned = pinnedTask?.id
+        func bucket(_ item: ScheduledTask) -> Int {
+            if item.id == focusTaskID { return 0 }
+            if item.id == pinned { return 1 }
+            if !contextTags.isEmpty, item.task.tags.contains(where: { tag in contextTags.contains { TagText.matches(tag, query: $0) } }) { return 2 }
+            return recent.contains(item.id) ? 3 : 4
         }
-        return pool.sorted {
+        func rank(_ item: ScheduledTask) -> (Int, Int, Int) {
+            let value = quality[item.id] ?? 9
+            if value == 0 { return (0, 0, 0) }
+            return (value >= LinkMatcher.fuzzy ? 2 : 1, bucket(item), value)
+        }
+        return matched.sorted {
             let (a, b) = (rank($0), rank($1))
-            if a != b { return a < b }
-            if a == 2 { return (latest[$0.id] ?? .distantPast) > (latest[$1.id] ?? .distantPast) }
+            if a.0 != b.0 { return a.0 < b.0 }
+            if a.1 != b.1 { return a.1 < b.1 }
+            if a.1 == 3, latest[$0.id] != latest[$1.id] { return (latest[$0.id] ?? .distantPast) > (latest[$1.id] ?? .distantPast) }
+            if a.2 != b.2 { return a.2 < b.2 }
             return (order[$0.id] ?? 0) < (order[$1.id] ?? 0)
         }
+    }
+}
+
+/// 待办标题与查询词的匹配：字面、拼音、拼音首字母、漏字模糊。
+@MainActor
+enum LinkMatcher {
+    /// 质量：0 编号精确；1 标题开头或某个词开头；2 标题 / 标签包含；3 拼音或首字母；4 漏字模糊（最差）。
+    static let fuzzy = 4
+
+    private struct Pinyin { let full: String; let initials: String }
+    private static var cache: [String: Pinyin] = [:]
+
+    private static func pinyin(_ title: String) -> Pinyin {
+        if let hit = cache[title] { return hit }
+        let latin = (title.applyingTransform(.mandarinToLatin, reverse: false) ?? title).applyingTransform(.stripDiacritics, reverse: false) ?? title
+        let words = latin.lowercased().split(whereSeparator: { $0.isWhitespace })
+        let entry = Pinyin(full: words.joined(), initials: String(words.compactMap(\.first)))
+        if cache.count > 4000 { cache.removeAll() }
+        cache[title] = entry
+        return entry
+    }
+
+    static func quality(of item: ScheduledTask, query: String, number: Int?) -> Int? {
+        let task = item.task
+        if let number, task.number == number { return 0 }
+        if let tag = TagText.searchTag(query) {
+            return task.tags.contains { TagText.matches($0, query: tag) } ? 2 : nil
+        }
+        let title = String(TaskText.rendered(task.title, alias: task.calendarName).characters)
+        let needle = query.lowercased()
+        let lower = title.lowercased()
+        if lower.hasPrefix(needle) { return 1 }
+        if lower.split(whereSeparator: { $0.isWhitespace || $0.isPunctuation }).contains(where: { $0.hasPrefix(needle) }) { return 1 }
+        if title.localizedStandardContains(query) || task.title.localizedStandardContains(query)
+            || task.tags.contains(where: { $0.localizedStandardContains(query) }) { return 2 }
+        let compact = needle.filter { !$0.isWhitespace }
+        if !compact.isEmpty, compact.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) {
+            let py = pinyin(title)
+            if py.full.contains(compact) || py.initials.contains(compact) { return 3 }
+        }
+        if compact.count >= 2, isSubsequence(compact, of: lower) { return fuzzy }
+        return nil
+    }
+
+    private static func isSubsequence(_ needle: String, of text: String) -> Bool {
+        var iterator = text.makeIterator()
+        for character in needle {
+            var found = false
+            while let next = iterator.next() { if next == character { found = true; break } }
+            if !found { return false }
+        }
+        return true
     }
 }
 

@@ -92,6 +92,24 @@ final class NotesNavigationTests: XCTestCase {
         XCTAssertNil(nav.selection)
         controller.close()
     }
+
+    func testOutlineAndCollapsedChaptersAreRememberedPerTag() {
+        let suite = defaults()
+        let nav = NotesNavigation(defaults: suite)
+        XCTAssertTrue(nav.showOutline, "目录默认显示")
+        nav.showOutline = false
+        XCTAssertFalse(NotesNavigation(defaults: suite).showOutline, "目录开关会被记住")
+
+        nav.setCollapsed(true, tag: "论文", chapter: "A")
+        XCTAssertTrue(nav.isCollapsed(tag: "论文", chapter: "A"))
+        XCTAssertTrue(nav.isCollapsed(tag: "论文", chapter: "A"))
+        XCTAssertFalse(nav.isCollapsed(tag: "论文", chapter: "B"))
+        XCTAssertFalse(nav.isCollapsed(tag: "读书", chapter: "A"), "每个标签各自折叠")
+        XCTAssertTrue(nav.isCollapsed(tag: "论文".uppercased(), chapter: "A"))
+        nav.setCollapsed(false, tag: "论文", chapter: "A")
+        XCTAssertFalse(nav.isCollapsed(tag: "论文", chapter: "A"))
+    }
+
 }
 
 @MainActor
@@ -158,5 +176,16 @@ final class DraftKeepingTests: XCTestCase {
         XCTAssertTrue(model.images.isEmpty && model.tags.isEmpty && model.pendingTag.isEmpty)
         model.tags = ["仅标签"]
         XCTAssertTrue(model.hasDraft, "只选了标签也算草稿")
+    }
+
+    func testDraftKeepsTheChosenLinkAndNoLinkChoice() {
+        let nav = NotesNavigation()
+        let id = UUID()
+        nav.updateDraft("tag:论文") { $0.link = id }
+        XCTAssertEqual(nav.draft("tag:论文").link, id)
+        nav.updateDraft("tag:论文") { $0.link = nil; $0.unlinked = true }
+        XCTAssertTrue(nav.draft("tag:论文").unlinked, "「这条不关联」也算草稿的一部分，不会被当成空草稿丢掉")
+        nav.updateDraft("tag:论文") { $0.unlinked = false }
+        XCTAssertTrue(nav.draft("tag:论文").isEmpty)
     }
 }

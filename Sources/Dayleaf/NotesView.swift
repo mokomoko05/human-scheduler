@@ -23,6 +23,8 @@ struct NotesView: View {
     @State private var previewing: ImagePreviewItem?
     @State private var focused = false
     @State private var error: String?
+    /// 标签页输入框里的 `@` 补全。
+    @StateObject private var tagMention = MentionState()
 
     private var selection: UUID? { get { nav.selection } nonmutating set { nav.selection = newValue } }
     private var tagSelection: String? { get { nav.tagSelection } nonmutating set { nav.tagSelection = newValue } }
@@ -91,7 +93,20 @@ struct NotesView: View {
         .background(Palette.background)
         .foregroundStyle(Palette.ink)
         .sheet(item: $previewing) { ImagePreviewSheet(store: store, item: $0) }
-        .onAppear { nav.validate(in: store) }
+        .onAppear {
+            nav.validate(in: store)
+            configureMention()
+        }
+    }
+
+    /// 标签页里 `@` 的候选：正在写的标签名下的待办排前面；选中后记进这个标签的草稿。
+    private func configureMention() {
+        let nav = nav, store = store
+        tagMention.provider = { query in store.linkCandidates(query: query, contextTags: nav.tagSelection.map { [$0] } ?? []) }
+        tagMention.onPick = { id in
+            guard let tag = nav.tagSelection else { return }
+            nav.updateDraft(NotesNavigation.draftKey(tag: tag)) { $0.link = id; $0.unlinked = false }
+        }
     }
 
     // MARK: - 左侧：有笔记的任务
@@ -325,6 +340,14 @@ struct NotesView: View {
                 }
             }
             Spacer()
+            if !topic.deleted, !topic.completed {
+                let pinned = store.pinnedTask?.id == topic.id
+                Button { store.pinTask(pinned ? nil : topic.id) } label: {
+                    Label(pinned ? "取消固定" : "固定", systemImage: pinned ? "pin.slash" : "pin")
+                }
+                .foregroundStyle(pinned ? Palette.accent : Palette.ink)
+                .help(pinned ? "取消固定：新日志不再默认记到这个待办" : "固定为当前待办：新日志（快速日志、笔记、日志窗口）没有指定时默认记到它名下，不计时")
+            }
             if !topic.deleted {
                 Button { close(); reveal(topic.id) } label: { Label("在清单中显示", systemImage: "list.bullet") }
                     .help("关闭笔记，回到清单并选中这个任务")
@@ -454,61 +477,144 @@ struct NotesView: View {
         return (log.taskNumber.map { "#\($0) " } ?? "") + title
     }
 
+    /// 目录至少要有两章、窗口够宽才显示。
+    private func showsOutline(chapters: [NotebookChapter], width: CGFloat) -> Bool {
+        chapterView && nav.showOutline && chapters.count >= 2 && width >= 640
+    }
+
     private func tagDetail(_ tag: String) -> some View {
         let tasks = store.tasks(taggedWith: tag)
         let notes = store.notes(forTag: tag)
+        let chapters = chapterView ? store.chapters(forTag: tag) : []
         return VStack(spacing: 0) {
             tagHeader(tag, tasks: tasks, notes: notes)
             Divider()
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 4) {
-                        if notes.isEmpty && tasks.isEmpty {
-                            Text("这个笔记本还是空的。在下面直接写一条，或给待办打上 #\(tag)。")
-                                .font(.system(size: 12)).foregroundStyle(Palette.muted).padding(.vertical, 12)
+            GeometryReader { geometry in
+                ScrollViewReader { proxy in
+                    HStack(spacing: 0) {
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 4) {
+                                if notes.isEmpty && tasks.isEmpty {
+                                    Text("这个笔记本还是空的。在下面直接写一条，或给待办打上 #\(tag)。")
+                                        .font(.system(size: 12)).foregroundStyle(Palette.muted).padding(.vertical, 12)
+                                }
+                                if chapterView { chapterList(tag, chapters) } else { dateList(notes) }
+                                Color.clear.frame(height: 1).id("end")
+                            }.padding(20)
                         }
-                        if chapterView { chapterList(tag) } else { dateList(notes) }
-                        Color.clear.frame(height: 1).id("end")
-                    }.padding(20)
+                        .onAppear { proxy.scrollTo("end", anchor: .bottom) }
+                        .onChange(of: tagSelection) { _ in proxy.scrollTo("end", anchor: .bottom) }
+                        .onChange(of: notes.count) { _ in withAnimation(Motion.quick) { proxy.scrollTo("end", anchor: .bottom) } }
+                        if showsOutline(chapters: chapters, width: geometry.size.width) {
+                            Divider()
+                            outline(tag, chapters, proxy: proxy)
+                        }
+                    }
                 }
-                .onAppear { proxy.scrollTo("end", anchor: .bottom) }
-                .onChange(of: tagSelection) { _ in proxy.scrollTo("end", anchor: .bottom) }
-                .onChange(of: notes.count) { _ in withAnimation(Motion.quick) { proxy.scrollTo("end", anchor: .bottom) } }
             }
             Divider()
             tagComposer(tag)
         }
     }
 
+    // MARK: - 标签页右侧的目录
+
+    static func chapterAnchor(_ chapter: NotebookChapter) -> String { "chapter-" + chapter.id }
+
+    /// 这个标签下的待办（章节）目录：点一项跳到那一章（折叠着就先展开）；内容很长时不用一路往下翻。
+    private func outline(_ tag: String, _ chapters: [NotebookChapter], proxy: ScrollViewProxy) -> some View {
+        let allCollapsed = chapters.allSatisfy { nav.isCollapsed(tag: tag, chapter: $0.id) }
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("目录").font(.system(size: 11, weight: .semibold)).foregroundStyle(Palette.muted)
+                Text("\(chapters.count)").font(.system(size: 11)).monospacedDigit().foregroundStyle(Palette.muted)
+                Spacer()
+                Button(allCollapsed ? "全部展开" : "全部折叠") {
+                    for chapter in chapters { nav.setCollapsed(!allCollapsed, tag: tag, chapter: chapter.id) }
+                }
+                .buttonStyle(.plain).font(.system(size: 11)).foregroundStyle(Palette.accent)
+                .help(allCollapsed ? "展开所有章节" : "折叠所有章节，只留标题")
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 1) {
+                    ForEach(chapters) { chapter in outlineRow(tag, chapter, proxy: proxy) }
+                }
+            }
+        }
+        .padding(.horizontal, 10).padding(.vertical, 12)
+        .frame(width: 210)
+        .background(Palette.background)
+        .accessibilityElement(children: .contain).accessibilityLabel("章节目录")
+    }
+
+    private func outlineRow(_ tag: String, _ chapter: NotebookChapter, proxy: ScrollViewProxy) -> some View {
+        let folded = nav.isCollapsed(tag: tag, chapter: chapter.id)
+        return Button {
+            if folded { nav.setCollapsed(false, tag: tag, chapter: chapter.id) }
+            let anchor = Self.chapterAnchor(chapter)
+            // 刚展开时先等布局更新，再滚过去。
+            DispatchQueue.main.async { withAnimation(Motion.quick) { proxy.scrollTo(anchor, anchor: .top) } }
+        } label: {
+            HStack(alignment: .firstTextBaseline, spacing: 5) {
+                Image(systemName: chapter.taskID == nil ? "square.and.pencil" : (chapter.completed ? "checkmark.circle.fill" : "circle"))
+                    .font(.system(size: 10)).foregroundStyle(chapter.completed ? Palette.success : Palette.muted)
+                if let number = chapter.number {
+                    Text("#\(number)").font(.system(size: 10, design: .monospaced)).foregroundStyle(Palette.muted)
+                }
+                Text(chapter.title).font(.system(size: 12)).lineLimit(2).multilineTextAlignment(.leading)
+                    .foregroundStyle(folded ? Palette.muted : Palette.ink)
+                Spacer(minLength: 2)
+                Text("\(chapter.notes.count)").font(.system(size: 10)).monospacedDigit().foregroundStyle(Palette.muted)
+            }
+            .padding(.horizontal, 6).padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("跳到这一章")
+        .accessibilityLabel("\(chapter.number.map { "#\($0) " } ?? "")\(chapter.title)，\(chapter.notes.count) 条笔记")
+    }
+
     /// 按待办（章节）：标签是笔记本，每个待办是里面的一章。
     @ViewBuilder
-    private func chapterList(_ tag: String) -> some View {
-        ForEach(store.chapters(forTag: tag)) { chapter in
-            chapterHeader(chapter)
-            if chapter.notes.isEmpty {
-                Text("还没有笔记").font(.system(size: 11)).foregroundStyle(Palette.muted).padding(.leading, 4).padding(.bottom, 6)
+    private func chapterList(_ tag: String, _ chapters: [NotebookChapter]) -> some View {
+        ForEach(chapters) { chapter in
+            let folded = nav.isCollapsed(tag: tag, chapter: chapter.id)
+            chapterHeader(tag, chapter, folded: folded).id(Self.chapterAnchor(chapter))
+            if !folded {
+                if chapter.notes.isEmpty {
+                    Text("还没有笔记").font(.system(size: 11)).foregroundStyle(Palette.muted).padding(.leading, 4).padding(.bottom, 6)
+                }
+                ForEach(chapter.notes) { item in noteRow(item, showDate: true) }
             }
-            ForEach(chapter.notes) { item in noteRow(item, showDate: true) }
         }
     }
 
-    private func chapterHeader(_ chapter: NotebookChapter) -> some View {
+    private func chapterHeader(_ tag: String, _ chapter: NotebookChapter, folded: Bool) -> some View {
         let canOpen = chapter.taskID.map { id in store.noteTopics().contains { $0.id == id } } ?? false
-        return Button { if let id = chapter.taskID, canOpen { select(task: id) } } label: {
-            HStack(spacing: 6) {
-                Image(systemName: chapter.taskID == nil ? "square.and.pencil" : (chapter.completed ? "checkmark.circle.fill" : "circle"))
-                    .foregroundStyle(chapter.completed ? Palette.success : Palette.muted).font(.system(size: 12))
-                if let number = chapter.number {
-                    Text("#\(number)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.muted)
-                }
-                Text(chapter.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
-                Text("\(chapter.notes.count) 条").font(.system(size: 11)).foregroundStyle(Palette.muted)
-                Rectangle().fill(Palette.line).frame(height: 1)
+        return HStack(spacing: 6) {
+            Button { nav.setCollapsed(!folded, tag: tag, chapter: chapter.id) } label: {
+                Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
+                    .rotationEffect(.degrees(folded ? 0 : 90)).frame(width: 16, height: 18).contentShape(Rectangle())
             }
+            .buttonStyle(.plain).foregroundStyle(Palette.muted)
+            .help(folded ? "展开这一章" : "折叠这一章").accessibilityLabel(folded ? "展开章节" : "折叠章节")
+            Button { if let id = chapter.taskID, canOpen { select(task: id) } } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: chapter.taskID == nil ? "square.and.pencil" : (chapter.completed ? "checkmark.circle.fill" : "circle"))
+                        .foregroundStyle(chapter.completed ? Palette.success : Palette.muted).font(.system(size: 12))
+                    if let number = chapter.number {
+                        Text("#\(number)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.muted)
+                    }
+                    Text(chapter.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    Text("\(chapter.notes.count) 条").font(.system(size: 11)).foregroundStyle(Palette.muted)
+                }
+            }
+            .buttonStyle(.plain).foregroundStyle(Palette.accent)
+            .help(canOpen ? "只看这个待办的全部笔记" : "")
+            Rectangle().fill(Palette.line).frame(height: 1)
         }
-        .buttonStyle(.plain).foregroundStyle(Palette.accent)
         .padding(.top, 14).padding(.bottom, 4)
-        .help(canOpen ? "只看这个待办的全部笔记" : "")
     }
 
     private func dateList(_ notes: [JournalStore.LoggedLog]) -> some View {
@@ -531,6 +637,11 @@ struct NotesView: View {
                     Text("按待办").tag(true)
                     Text("按日期").tag(false)
                 }.pickerStyle(.segmented).labelsHidden().frame(width: 140)
+                if chapterView {
+                    Button { nav.showOutline.toggle() } label: { Image(systemName: "sidebar.right") }
+                        .foregroundStyle(nav.showOutline ? Palette.accent : Palette.muted)
+                        .help(nav.showOutline ? "隐藏右侧的章节目录" : "显示右侧的章节目录").accessibilityLabel("章节目录")
+                }
                 Button {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(Self.markdown(tag: tag, tasks: tasks, notes: notes), forType: .string)
@@ -541,40 +652,35 @@ struct NotesView: View {
         .padding(.horizontal, 20).padding(.vertical, 14)
     }
 
-    /// 标签页底部：直接往这个笔记本里写，不需要关联待办；也可以顺手选一个待办作为它的章节。
+    /// 标签页底部：直接往这个笔记本里写，不需要关联待办；写 `@` 加几个字（或点上面的关联条）可以记在某个待办（章节）名下。
     private func tagComposer(_ tag: String) -> some View {
         let key = tagDraftKey(tag)
         let pending = images(key)
-        let link = nav.draft(key).link
         let text = nav.draft(key).text
+        let link = Binding<UUID?>(get: { nav.draft(key).link }, set: { value in nav.updateDraft(key) { $0.link = value } })
+        let unlinked = Binding<Bool>(get: { nav.draft(key).unlinked }, set: { value in nav.updateDraft(key) { $0.unlinked = value } })
         return VStack(alignment: .leading, spacing: 6) {
             if !pending.isEmpty {
                 PendingImagesStrip(store: store, names: pending,
                                    remove: { name in removeImage(name, from: key) },
                                    preview: { previewing = ImagePreviewItem(names: pending, index: $0) })
             }
+            MentionList(state: tagMention, store: store, contextTags: [tag])
             HStack(spacing: 8) {
                 Image(systemName: "square.and.pencil").foregroundStyle(Palette.accent)
                 TaskInput(text: textBinding(key), focused: $tagFocused,
-                          placeholder: "写进 #\(tag)，回车保存，⌘V 粘贴图片",
+                          placeholder: "写进 #\(tag)，回车保存 · @ 关联待办 · ⌘V 粘贴图片",
                           fontSize: 13, submit: { submitTag(tag) }, onPasteImages: { datas in
                     addImages(ImageTools.save(datas, in: store), to: key)
                     tagFocused = true
-                }, minHeight: 24, maxLines: 10).disabled(store.isReadOnly)
-                LinkPickerButton(store: store, current: link, pick: { picked in nav.updateDraft(key) { $0.link = picked } }) {
-                    Label(link.flatMap { store.locate($0) }.map { FocusHint.label($0) } ?? "关联待办（可选）", systemImage: "link")
-                        .font(.system(size: 11)).lineLimit(1).frame(maxWidth: 190)
-                        .foregroundStyle(link == nil ? Palette.muted : Palette.accent)
-                }.fixedSize().disabled(store.isReadOnly).help("把这条记在某个待办（章节）名下；不选就是直接记在笔记本里")
+                }, minHeight: 24, maxLines: 10, mention: tagMention).disabled(store.isReadOnly)
                 Button { submitTag(tag) } label: { Image(systemName: "arrow.turn.down.left") }
                     .buttonStyle(HitAreaButtonStyle())
                     .disabled(store.isReadOnly || (text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pending.isEmpty))
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(Palette.card, in: RoundedRectangle(cornerRadius: 8))
-            if let focus = store.focusTask, link == nil {
-                Text("专注中：不选待办时，这条会关联到 \(FocusHint.label(focus))").font(.system(size: 11)).foregroundStyle(Palette.muted)
-            }
+            LogLinkBar(store: store, link: link, unlinked: unlinked, contextTags: [tag])
             if let error {
                 Text(error).font(.system(size: 11)).foregroundStyle(error.hasPrefix("已") ? Palette.success : Palette.deadline)
             }
@@ -588,7 +694,7 @@ struct NotesView: View {
         let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !draft.images.isEmpty else { return }
         do {
-            let command = try store.quickLog(text, images: draft.images, taskID: draft.link, tags: [tag], on: Date())
+            let command = try store.quickLog(text, images: draft.images, taskID: draft.link, linkDefault: !draft.unlinked, tags: [tag], on: Date())
             guard case .entry = command else { error = "这里只能写笔记，不支持 \(text) 这类命令。"; return }
             nav.clearDraft(key)
             error = nil

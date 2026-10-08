@@ -43,6 +43,7 @@ struct DailyLogView: View {
     @State private var preparingReview = false
     @State private var focused = false
     @State private var error: String?
+    @StateObject private var mention = MentionState()
     @State private var historyIndex: Int?
     @State private var pendingDraft = ""
     @State private var pendingTaskID: UUID?
@@ -433,12 +434,21 @@ struct DailyLogView: View {
                     Spacer(minLength: 0)
                 }.font(.system(size: UIScale.pt(10))).foregroundStyle(TerminalPalette.green)
             }
+            if entry.logTaskID == nil, store.focusTask == nil, let task = store.pinnedTask {
+                HStack(spacing: 4) {
+                    Image(systemName: "pin.fill")
+                    Text("固定关联：日志会记到 \(FocusHint.label(task))").lineLimit(1)
+                    Spacer(minLength: 0)
+                    Button("取消固定") { store.pinTask(nil) }.buttonStyle(.plain).foregroundStyle(Palette.accent)
+                }.font(.system(size: UIScale.pt(10))).foregroundStyle(TerminalPalette.muted)
+            }
+            MentionList(state: mention, store: store)
             HStack(spacing: 5) {
                 Text("❯").font(.system(size: UIScale.pt(15), weight: .semibold, design: .monospaced))
                     .foregroundStyle(TerminalPalette.green)
-                TaskInput(text: draft, focused: $focused, placeholder: "记录…  输入 / 查看命令，⌘V 粘贴图片", fontSize: 12, submit: submit,
+                TaskInput(text: draft, focused: $focused, placeholder: "记录…  @ 关联待办 · 输入 / 查看命令 · ⌘V 粘贴图片", fontSize: 12, submit: submit,
                           monospaced: true, historyUp: historyUp, historyDown: historyDown, complete: completeCommand,
-                          onPasteImages: addImages, minHeight: 24, maxLines: 10)
+                          onPasteImages: addImages, minHeight: 24, maxLines: 10, mention: mention)
                     .disabled(store.isReadOnly)
                     .accessibilityLabel("日志命令输入，回车提交")
                     .onChange(of: focused) { if $0 { interaction.activePane = .summary } }
@@ -448,6 +458,15 @@ struct DailyLogView: View {
                     .disabled(store.isReadOnly || (entry.logDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && entry.logDraftImages.isEmpty))
             }.padding(.horizontal, 6).padding(.vertical, 3).background(TerminalPalette.surface)
         }
+        .onAppear(perform: configureMention)
+        .onChange(of: date) { _ in configureMention() }
+    }
+
+    /// 输入框里的 `@`：选中的待办成为下一条日志的关联（和「关联任务」按钮一样）。
+    private func configureMention() {
+        let store = store, date = date
+        mention.provider = { query in store.linkCandidates(query: query) }
+        mention.onPick = { id in store.setLogTask(id, on: date) }
     }
 
     private var taskMenu: some View {

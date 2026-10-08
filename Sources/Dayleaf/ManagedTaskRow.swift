@@ -47,8 +47,11 @@ struct ManagedTaskRow: View {
                               next: next, itemID: task.id, requestedEdit: $requestedEdit,
                               prepare: selectTask)
                 }
-                if task.dueDate != nil || task.repeatRule != .none || task.focusSeconds >= 1 || focus?.active?.taskID == task.id || !task.tags.isEmpty {
+                if task.dueDate != nil || task.repeatRule != .none || task.focusSeconds >= 1 || focus?.active?.taskID == task.id || !task.tags.isEmpty || store.pinnedTask?.id == task.id {
                     HStack(spacing: 4) {
+                        if store.pinnedTask?.id == task.id {
+                            Image(systemName: "pin.fill").foregroundStyle(Palette.accent).help("固定关联：新日志默认记到它名下")
+                        }
                         if let due = task.dueDate {
                             Image(systemName: "clock")
                             Text(dueText(due))
@@ -67,6 +70,12 @@ struct ManagedTaskRow: View {
             HStack(spacing: 0) {
                 if let focus, !task.completed, let url = FocusSession.link(in: task.title) {
                     FocusPlayButton(session: focus, task: ScheduledTask(date: date, task: task), url: url)
+                }
+                if !task.completed {
+                    let pinned = store.pinnedTask?.id == task.id
+                    ItemActionButton(symbol: pinned ? "pin.fill" : "pin", title: pinned ? "取消固定" : "固定为当前待办：新日志默认记到它名下（不计时）", active: pinned) {
+                        store.pinTask(pinned ? nil : task.id)
+                    }
                 }
                 ItemActionButton(symbol: task.tags.isEmpty ? "tag" : "tag.fill", title: "标签") {
                     selectTask()
