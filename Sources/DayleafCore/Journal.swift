@@ -375,6 +375,56 @@ public final class JournalStore: ObservableObject {
         change(date, debounce: true) { $0.logTaskID = id }
     }
 
+    /// 批量把日志关联到同一个待办（nil 取消关联），作为一次操作撤销。返回改动的条数。
+    @discardableResult
+    public func setLogTask(_ taskID: UUID?, forLogs ids: Set<UUID>) -> Int {
+        guard !isReadOnly, !ids.isEmpty else { return 0 }
+        let located = taskID.flatMap(locate)
+        if taskID != nil, located == nil { return 0 }
+        var updated = days
+        var changed = 0
+        for key in updated.keys {
+            for index in updated[key]!.logs.indices where ids.contains(updated[key]!.logs[index].id) {
+                var log = updated[key]!.logs[index]
+                let title = located.map { String(TaskText.rendered($0.task.title).characters) }
+                if log.taskID == located?.id, log.taskTitle == title { continue }
+                log.taskID = located?.id
+                log.taskTitle = title
+                log.taskNumber = located?.task.number
+                log.taskTags = located?.task.tags ?? []
+                updated[key]!.logs[index] = log
+                changed += 1
+            }
+        }
+        guard changed > 0 else { return 0 }
+        replaceDays(updated, action: "批量关联待办")
+        return changed
+    }
+
+    /// 批量给日志加、去标签，作为一次操作撤销。返回改动的条数。
+    @discardableResult
+    public func updateLogTags(add: [String] = [], remove: [String] = [], forLogs ids: Set<UUID>) -> Int {
+        guard !isReadOnly, !ids.isEmpty else { return 0 }
+        let added = add.compactMap(TagText.normalize)
+        let removedKeys = Set(remove.compactMap(TagText.normalize).map(TagText.key))
+        guard !added.isEmpty || !removedKeys.isEmpty else { return 0 }
+        var updated = days
+        var changed = 0
+        for key in updated.keys {
+            for index in updated[key]!.logs.indices where ids.contains(updated[key]!.logs[index].id) {
+                let before = updated[key]!.logs[index].tags
+                let kept = before.filter { !removedKeys.contains(TagText.key($0)) }
+                let after = TagText.merge(kept, added)
+                guard after != before else { continue }
+                updated[key]!.logs[index].tags = after
+                changed += 1
+            }
+        }
+        guard changed > 0 else { return 0 }
+        replaceDays(updated, action: "批量标签")
+        return changed
+    }
+
     /// 修改一条已经提交的日志所关联的任务（nil 取消关联），可撤销。历史日志也能补打标签。
     public func setLogTask(_ taskID: UUID?, forLog logID: UUID, on date: Date) {
         let located = taskID.flatMap(locate)

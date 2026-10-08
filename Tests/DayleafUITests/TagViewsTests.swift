@@ -34,6 +34,16 @@ final class TagViewsTests: XCTestCase {
         XCTAssertGreaterThan(narrow.height, wide.height * 2, "窄了就折成多行")
     }
 
+    func testBatchTagViewRendersForSelectedLogs() throws {
+        let store = makeStore()
+        _ = try store.quickLog("甲", on: day, now: day.addingTimeInterval(1))
+        _ = try store.quickLog("乙", on: day, now: day.addingTimeInterval(2))
+        let ids = Set(store.allLogs().map(\.log.id))
+        store.updateLogTags(add: ["灵感"], forLogs: [try XCTUnwrap(ids.first)])
+        let size = layout(LogBatchTagView(store: store, logIDs: ids), width: 380)
+        XCTAssertGreaterThan(size.height, 100, "部分日志带有的标签也会列出来")
+    }
+
     func testPickerAndNotesViewRenderWithTags() throws {
         let store = makeStore()
         let a = try XCTUnwrap(store.addParsedTodo("读摘要 #论文", on: day))

@@ -183,3 +183,77 @@ final class LogTagTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(DailyLogEntry.self, from: data).taskTags, [])
     }
 }
+
+@MainActor
+final class BatchLogTests: XCTestCase {
+    private let day = JournalDates.calendar.date(from: DateComponents(year: 2026, month: 10, day: 7))!
+
+    private func makeStore() -> JournalStore {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return JournalStore(directory: directory)
+    }
+
+    private func logIDs(_ store: JournalStore) -> [UUID] { store.allLogs().map(\.log.id) }
+
+    func testBatchTagsAddRemoveAreOneUndoAndWorkWithoutATask() throws {
+        let store = makeStore()
+        _ = try store.quickLog("甲", on: day, now: day.addingTimeInterval(1))
+        _ = try store.quickLog("乙", on: day, now: day.addingTimeInterval(2))
+        _ = try store.quickLog("丙", on: day, now: day.addingTimeInterval(3))
+        let ids = logIDs(store)
+        XCTAssertEqual(store.updateLogTags(add: ["#灵感", "项目/A", "a b"], forLogs: Set(ids.prefix(2))), 2, "非法标签被忽略")
+        XCTAssertEqual(store.allLogs().map(\.log.tags), [["灵感", "项目/A"], ["灵感", "项目/A"], []])
+        XCTAssertEqual(store.notes(forTag: "灵感").map(\.log.text), ["甲", "乙"], "没有关联待办的日志也能按标签汇总")
+        XCTAssertEqual(store.notes(forTag: "项目").count, 2, "含子标签")
+        XCTAssertEqual(store.updateLogTags(add: ["灵感"], forLogs: Set(ids.prefix(2))), 0, "已有的不算改动")
+        XCTAssertEqual(store.updateLogTags(remove: ["灵感"], forLogs: [ids[0]]), 1)
+        XCTAssertEqual(store.allLogs().first?.log.tags, ["项目/A"])
+        store.undoManager.undo()
+        XCTAssertEqual(store.allLogs().first?.log.tags, ["灵感", "项目/A"], "撤销一次还原整批")
+        store.undoManager.undo()
+        XCTAssertTrue(store.allLogs().allSatisfy { $0.log.tags.isEmpty })
+    }
+
+    func testLogTagsAddToTheLinkedTaskTagsAndShowInSummaries() throws {
+        let store = makeStore()
+        let task = try XCTUnwrap(store.addParsedTodo("读论文 #论文", on: day))
+        _ = try store.quickLog("笔记", taskID: task.id, on: day)
+        let id = try XCTUnwrap(store.allLogs().first?.log.id)
+        store.updateLogTags(add: ["待整理"], forLogs: [id])
+        XCTAssertEqual(store.tags(of: try XCTUnwrap(store.allLogs().first?.log)), ["论文", "待整理"])
+        XCTAssertEqual(store.notes(forTag: "待整理").count, 1)
+        XCTAssertEqual(store.allTags().first { $0.name == "待整理" }?.noteCount, 1)
+        XCTAssertEqual(store.allTags().first { $0.name == "待整理" }?.taskCount, 0, "只在日志上，不算待办")
+    }
+
+    func testBatchLinkSetsTaskTitleNumberAndTagsAndUnlinks() throws {
+        let store = makeStore()
+        let a = try XCTUnwrap(store.addParsedTodo("读论文 #论文", on: day))
+        let b = try XCTUnwrap(store.addParsedTodo("写周报", on: day))
+        _ = try store.quickLog("甲", taskID: b.id, on: day, now: day.addingTimeInterval(1))
+        _ = try store.quickLog("乙", on: day, now: day.addingTimeInterval(2))
+        _ = try store.quickLog("丙", on: day, now: day.addingTimeInterval(3))
+        let ids = logIDs(store)
+        XCTAssertEqual(store.setLogTask(a.id, forLogs: Set(ids)), 3)
+        for log in store.allLogs().map(\.log) {
+            XCTAssertEqual(log.taskID, a.id)
+            XCTAssertEqual(log.taskNumber, a.task.number)
+            XCTAssertEqual(log.taskTags, ["论文"])
+            XCTAssertEqual(log.taskTitle, "读论文")
+        }
+        XCTAssertEqual(store.notes(for: a.id).count, 3)
+        XCTAssertEqual(store.setLogTask(a.id, forLogs: Set(ids)), 0, "已经关联的不重复改动")
+        store.undoManager.undo()
+        XCTAssertEqual(store.allLogs().map(\.log.taskID), [b.id, nil, nil], "撤销一次还原整批")
+        XCTAssertEqual(store.setLogTask(nil, forLogs: Set(ids)), 1)
+        XCTAssertTrue(store.allLogs().allSatisfy { $0.log.taskID == nil && $0.log.taskNumber == nil })
+        XCTAssertEqual(store.setLogTask(UUID(), forLogs: Set(ids)), 0, "不存在的待办不改动")
+    }
+
+    func testOldLogsWithoutOwnTagsDecodeAndEncodeUnchanged() throws {
+        let log = DailyLogEntry(createdAt: day, kind: .note, text: "旧")
+        XCTAssertFalse(String(decoding: try JSONEncoder().encode(log), as: UTF8.self).contains("\"tags\""), "没有标签不写新字段")
+        XCTAssertEqual(try JSONDecoder().decode(DailyLogEntry.self, from: try JSONEncoder().encode(log)).tags, [])
+    }
+}

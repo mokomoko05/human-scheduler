@@ -31,6 +31,8 @@ public struct DailyLogEntry: Codable, Equatable, Identifiable {
     public var taskNumber: Int?
     /// 记录日志时所关联待办的标签（快照）：待办被删除后，按标签仍然能找到这条日志。
     public var taskTags: [String]
+    /// 日志自己的标签（批量或单独加的），不依赖关联的待办；和待办的标签一起参与按标签汇总。
+    public var tags: [String]
     /// 图片文件名（位于数据目录的 Images 文件夹）。
     public var images: [String]
     /// 图片名 → 识别出的文字。没有该键表示尚未识别，空字符串表示识别过但没有文字。
@@ -38,7 +40,7 @@ public struct DailyLogEntry: Codable, Equatable, Identifiable {
     /// 专注计时产生的开始、结束记录：显示在终端日志里，但不进入笔记视图。
     public var focus: Bool
 
-    public init(id: UUID = UUID(), createdAt: Date, kind: DailyLogKind, text: String, taskID: UUID? = nil, taskTitle: String? = nil, taskNumber: Int? = nil, taskTags: [String] = [],
+    public init(id: UUID = UUID(), createdAt: Date, kind: DailyLogKind, text: String, taskID: UUID? = nil, taskTitle: String? = nil, taskNumber: Int? = nil, taskTags: [String] = [], tags: [String] = [],
                 images: [String] = [], imageText: [String: String] = [:], focus: Bool = false) {
         self.id = id
         self.createdAt = createdAt
@@ -48,13 +50,14 @@ public struct DailyLogEntry: Codable, Equatable, Identifiable {
         self.taskTitle = taskTitle
         self.taskNumber = taskNumber
         self.taskTags = taskTags
+        self.tags = tags
         self.images = images
         self.imageText = imageText
         self.focus = focus
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, createdAt, kind, text, taskID, taskTitle, taskNumber, taskTags, images, imageText, focus
+        case id, createdAt, kind, text, taskID, taskTitle, taskNumber, taskTags, tags, images, imageText, focus
     }
 
     public init(from decoder: Decoder) throws {
@@ -67,6 +70,7 @@ public struct DailyLogEntry: Codable, Equatable, Identifiable {
         taskTitle = try values.decodeIfPresent(String.self, forKey: .taskTitle)
         taskNumber = try values.decodeIfPresent(Int.self, forKey: .taskNumber)
         taskTags = try values.decodeIfPresent([String].self, forKey: .taskTags) ?? []
+        tags = try values.decodeIfPresent([String].self, forKey: .tags) ?? []
         images = try values.decodeIfPresent([String].self, forKey: .images) ?? []
         imageText = try values.decodeIfPresent([String: String].self, forKey: .imageText) ?? [:]
         focus = try values.decodeIfPresent(Bool.self, forKey: .focus) ?? false
@@ -83,6 +87,7 @@ public struct DailyLogEntry: Codable, Equatable, Identifiable {
         try values.encodeIfPresent(taskTitle, forKey: .taskTitle)
         try values.encodeIfPresent(taskNumber, forKey: .taskNumber)
         if !taskTags.isEmpty { try values.encode(taskTags, forKey: .taskTags) }
+        if !tags.isEmpty { try values.encode(tags, forKey: .tags) }
         if !images.isEmpty { try values.encode(images, forKey: .images) }
         if !imageText.isEmpty { try values.encode(imageText, forKey: .imageText) }
         if focus { try values.encode(true, forKey: .focus) }

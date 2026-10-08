@@ -139,9 +139,11 @@ extension JournalStore {
         Dictionary(tasks().map { ($0.id, $0.task.tags) }, uniquingKeysWith: { first, _ in first })
     }
 
+    /// 日志的标签 = 关联待办的标签（待办还在用现在的，已删除用记录时的快照）+ 日志自己的标签。
     private func effectiveTags(of log: DailyLogEntry, live: [UUID: [String]]) -> [String] {
-        if let id = log.taskID, let tags = live[id] { return tags }
-        return log.taskTags
+        let inherited: [String]
+        if let id = log.taskID, let tags = live[id] { inherited = tags } else { inherited = log.taskTags }
+        return log.tags.isEmpty ? inherited : TagText.merge(inherited, log.tags)
     }
 
     /// 带这个标签（或它的子标签）的待办，按清单顺序。
@@ -149,7 +151,7 @@ extension JournalStore {
         tasks().filter { $0.task.tags.contains { TagText.matches($0, query: tag) } }.sorted(by: ScheduledTask.listOrder)
     }
 
-    /// 一条日志现在带的标签：关联的待办还在就用它当前的标签（之后改标签会跟着变），已删除就用记录时的快照。
+    /// 一条日志现在带的标签：关联的待办还在就用它当前的标签（之后改标签会跟着变），已删除就用记录时的快照，再加上日志自己的标签。
     public func tags(of log: DailyLogEntry) -> [String] {
         effectiveTags(of: log, live: liveTags())
     }
