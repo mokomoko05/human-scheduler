@@ -54,9 +54,16 @@ final class TagViewsTests: XCTestCase {
         let many = layout(LinkPickerView(store: store, current: nil, pick: { _ in }), width: 380)
         XCTAssertLessThan(many.height, 460, "待办很多时列表高度有上限，不会撑满屏幕")
         XCTAssertGreaterThan(store.linkCandidates().count, 40)
+        // 关联条永远只有一行：选了很多标签、很长的待办名，高度也不变。
         var chosen: [String] = []
-        let bar = layout(TagSelectionBar(store: store, selection: Binding(get: { chosen }, set: { chosen = $0 })), width: 460)
-        XCTAssertGreaterThan(bar.height, 20)
+        let empty = layout(LogChipsBar(store: store, link: .constant(nil), unlinked: .constant(false),
+                                       tags: Binding(get: { chosen }, set: { chosen = $0 }), hint: "提示"), width: 460)
+        chosen = ["读书笔记", "论文", "很长很长的标签名称一二三四五六七", "另一个", "再一个", "还有一个"]
+        store.pinTask(store.locate(number: 1)!.id)
+        let full = layout(LogChipsBar(store: store, link: .constant(nil), unlinked: .constant(false),
+                                      tags: Binding(get: { chosen }, set: { chosen = $0 })), width: 460)
+        XCTAssertEqual(empty.height, LogChipsBar.height, accuracy: 1)
+        XCTAssertEqual(full.height, LogChipsBar.height, accuracy: 1, "选再多也不会让窗口变高")
         for tag in ["读书笔记", "论文"] {
             let notes = NotesView(store: store, initialTag: tag, reveal: { _ in }, openDay: { _ in })
             XCTAssertGreaterThan(layout(notes, width: 900).height, 100, "空标签和有内容的标签都能打开")

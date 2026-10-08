@@ -8,8 +8,10 @@ struct NoteDraft: Equatable {
     var link: UUID?
     /// 明确选了「不关联」（专注中 / 固定关联时，默认会自动关联）。
     var unlinked = false
+    /// 在输入框里用 `#` 额外选的标签。
+    var tags: [String] = []
 
-    var isEmpty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty && link == nil && !unlinked }
+    var isEmpty: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && images.isEmpty && link == nil && !unlinked && tags.isEmpty }
 }
 
 /// 笔记窗口停在哪里：选中的任务或标签、搜索词、标签页按待办还是按日期看。

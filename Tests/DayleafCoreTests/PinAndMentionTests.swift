@@ -148,4 +148,38 @@ final class PinAndMentionTests: XCTestCase {
         XCTAssertEqual(Set(fuzzy), [1, 2], "读…文 按顺序出现的都算")
         XCTAssertFalse(fuzzy.contains(3), "顺序不对不算")
     }
+
+    // MARK: - 日志窗口的 # 标签草稿
+
+    func testDayLogDraftTagsAreCommittedKeptOnFailureAndPersisted() throws {
+        let store = makeStore()
+        store.addDraftTag("#论文", on: day)
+        store.addDraftTag("论文", on: day)
+        store.addDraftTag("读书/笔记", on: day)
+        store.addDraftTag("3", on: day)
+        XCTAssertEqual(store.entry(for: day).logDraftTags, ["论文", "读书/笔记"], "去重，纯数字不是标签")
+
+        store.setLogDraft("", on: day)
+        XCTAssertThrowsError(try store.commitLog(on: day), "空内容提交失败")
+        XCTAssertEqual(store.entry(for: day).logDraftTags, ["论文", "读书/笔记"], "失败时草稿里的标签还在")
+
+        store.save()
+        XCTAssertEqual(JournalStore(directory: directory).entry(for: day).logDraftTags, ["论文", "读书/笔记"], "标签草稿随数据保存，重启还在")
+
+        store.removeDraftTag("读书/笔记", on: day)
+        store.setLogDraft("写了一段", on: day)
+        _ = try store.commitLog(on: day)
+        let log = try XCTUnwrap(store.allLogs().last?.log)
+        XCTAssertEqual(log.tags, ["论文"], "提交后成为这条日志自己的标签")
+        XCTAssertEqual(store.notes(forTag: "论文").map(\.log.id), [log.id], "能从标签里检索到")
+        XCTAssertTrue(store.entry(for: day).logDraftTags.isEmpty, "提交后清空")
+    }
+
+    func testOnlyTagsWithoutTextStillNeedsContent() throws {
+        let store = makeStore()
+        store.addDraftTag("论文", on: day)
+        store.setLogDraft("", on: day)
+        XCTAssertThrowsError(try store.commitLog(on: day))
+        XCTAssertTrue(store.entry(for: day).hasContent, "只选了标签也算有草稿，不会被当成空的一天清掉")
+    }
 }

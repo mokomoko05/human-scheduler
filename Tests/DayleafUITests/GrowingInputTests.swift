@@ -81,3 +81,18 @@ final class GrowingInputTests: XCTestCase {
 
     private static var keepAlive: [AnyObject] = []
 }
+
+/// 快速浮窗的位置按顶边记：高度变了，顶边也不动。
+@MainActor
+final class QuickPanelPositionTests: XCTestCase {
+    func testTopEdgeSurvivesAHeightChange() {
+        let closed = NSRect(x: 300, y: 500, width: 520, height: 230)
+        let saved = QuickCaptureController.topLeft(of: closed)
+        // 下次打开时窗口先是 160 高，布局后长到 190：两种高度下顶边都回到同一处。
+        for height in [160.0, 190, 230, 320] {
+            let origin = QuickCaptureController.origin(topLeft: saved, height: height)
+            XCTAssertEqual(origin.y + height, closed.maxY, accuracy: 0.001)
+            XCTAssertEqual(origin.x, closed.minX)
+        }
+    }
+}

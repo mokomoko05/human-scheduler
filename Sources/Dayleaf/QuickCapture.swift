@@ -81,8 +81,6 @@ final class QuickCaptureModel: ObservableObject {
     /// 这条日志明确关联的待办（`@` 选的，或用选择器选的）；`unlinked` 表示明确不关联。都没有时按专注 / 固定关联自动处理。
     @Published var link: UUID?
     @Published var unlinked = false
-    /// 标签栏里「新标签」输入框里写了一半的字。
-    @Published var pendingTag = ""
 
     var hasDraft: Bool {
         !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !images.isEmpty || !tags.isEmpty || link != nil
@@ -94,7 +92,6 @@ final class QuickCaptureModel: ObservableObject {
         tags = []
         link = nil
         unlinked = false
-        pendingTag = ""
     }
 }
 
@@ -214,7 +211,11 @@ final class QuickCaptureController: NSObject, NSMenuDelegate, NSWindowDelegate {
         let view = QuickCaptureView(store: store, model: model, close: { [weak self] in self?.panel?.close() },
                                     resize: { [weak self] height in self?.resize(height: height) })
         let host = NSHostingView(rootView: view)
+        // 一开始就按内容的真实高度创建，不先给个临时高度再长出来。
         host.setFrameSize(NSSize(width: 520, height: 160))
+        host.layoutSubtreeIfNeeded()
+        let fitted = host.fittingSize
+        if fitted.height > 60 { host.setFrameSize(NSSize(width: 520, height: fitted.height)) }
         let panel = QuickPanel(contentRect: NSRect(origin: .zero, size: host.frame.size),
                                styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.contentView = host
@@ -244,12 +245,17 @@ final class QuickCaptureController: NSObject, NSMenuDelegate, NSWindowDelegate {
     }
 
     /// 用户拖到哪里就记住哪里；下次呼出时回到同一位置。
+    /// 记的是**左上角**而不是左下角：窗口高度会随内容变（标签栏、图片、多行输入），按左下角记，下次高度不同位置就会偏。
     func windowDidMove(_ notification: Notification) {
-        guard let origin = panel?.frame.origin else { return }
-        UserDefaults.standard.set(NSStringFromPoint(origin), forKey: Self.positionKey)
+        guard let frame = panel?.frame else { return }
+        UserDefaults.standard.set(NSStringFromPoint(Self.topLeft(of: frame)), forKey: Self.positionKey)
     }
 
-    static let positionKey = "quickCaptureOrigin"
+    /// 旧版本记的是左下角（`quickCaptureOrigin`），高度不确定，不再沿用。
+    static let positionKey = "quickCaptureTopLeft"
+
+    static func topLeft(of frame: NSRect) -> NSPoint { NSPoint(x: frame.minX, y: frame.maxY) }
+    static func origin(topLeft: NSPoint, height: CGFloat) -> NSPoint { NSPoint(x: topLeft.x, y: topLeft.y - height) }
 
     private func defaultOrigin(for size: NSSize) -> NSPoint {
         let frame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
@@ -259,7 +265,7 @@ final class QuickCaptureController: NSObject, NSMenuDelegate, NSWindowDelegate {
     /// 已保存的位置仍在某块屏幕内才使用；外接显示器拔掉后自动回到默认位置。
     private func restoredOrigin(for size: NSSize) -> NSPoint {
         guard let saved = UserDefaults.standard.string(forKey: Self.positionKey) else { return defaultOrigin(for: size) }
-        let origin = NSPointFromString(saved)
+        let origin = Self.origin(topLeft: NSPointFromString(saved), height: size.height)
         let rect = NSRect(origin: origin, size: size)
         let visible = NSScreen.screens.contains { screen in
             let overlap = screen.visibleFrame.intersection(rect)
@@ -316,7 +322,7 @@ struct QuickCaptureView: View {
             HStack(spacing: 8) {
                 Image(systemName: mode == .todo ? "plus.circle" : "chevron.right.2").foregroundStyle(Palette.accent)
                 TaskInput(text: $model.text, focused: $focused,
-                          placeholder: mode == .todo ? "添加待办，例如：明天 15:00 开会 #项目A" : "记录…  @ 关联待办 · /done /block /plan 开头 · ⌘V 粘贴图片",
+                          placeholder: mode == .todo ? "添加待办，例如：明天 15:00 开会 #项目A" : "记录…  @ 待办 · # 标签 · /done /block /plan · ⌘V 贴图",
                           fontSize: 16, submit: submit, cancel: close, complete: { mode = mode == .todo ? .log : .todo },
                           onPasteImages: mode == .log ? addImages : nil,
                           minHeight: 28, maxLines: 12, allowsNewlines: mode == .log, mention: mode == .log ? mention : nil)
@@ -329,10 +335,6 @@ struct QuickCaptureView: View {
                                    remove: { name in images.removeAll { $0 == name } },
                                    preview: { NSWorkspace.shared.open(store.imageURL(images[$0])) })
             }
-            if mode == .log {
-                LogLinkBar(store: store, link: $model.link, unlinked: $model.unlinked, contextTags: model.tags)
-                TagSelectionBar(store: store, selection: $model.tags, draftBinding: $model.pendingTag)
-            }
             Group {
                 if let message {
                     Label(message, systemImage: "checkmark.circle.fill").foregroundStyle(Palette.success)
@@ -344,13 +346,17 @@ struct QuickCaptureView: View {
                         Button("清空") { model.clearDraft(); restored = false; focused = true }
                             .buttonStyle(.plain).foregroundStyle(Palette.accent)
                     }
-                } else if mode == .todo, parsed.hasSchedule || !parsed.tags.isEmpty {
-                    ParsedChips(parsed: parsed)
+                } else if mode == .todo {
+                    if parsed.hasSchedule || !parsed.tags.isEmpty {
+                        ParsedChips(parsed: parsed)
+                    } else {
+                        Text("回车添加；写上日期、时间会成为截止日期，不写则之后再分配").foregroundStyle(Palette.muted)
+                    }
                 } else {
-                    Text(mode == .todo ? "回车添加；写上日期、时间会成为截止日期，不写则之后再分配" : "回车记录到今天；点下面的标签可以直接记进某个笔记本")
-                        .foregroundStyle(Palette.muted)
+                    LogChipsBar(store: store, link: $model.link, unlinked: $model.unlinked, tags: $model.tags, contextTags: model.tags,
+                                hint: "回车记录到今天 · @ 关联待办 · # 选标签")
                 }
-            }.font(.system(size: UIScale.pt(12))).frame(height: 20, alignment: .leading)
+            }.font(.system(size: UIScale.pt(12))).frame(height: LogChipsBar.height, alignment: .leading)
         }
         .padding(16)
         .frame(width: 520)
@@ -365,8 +371,15 @@ struct QuickCaptureView: View {
         .onChange(of: model.text) { _ in restored = false }
         .onAppear {
             restored = model.hasDraft
-            mention.provider = { [store, model] query in store.linkCandidates(query: query, contextTags: model.tags) }
-            mention.onPick = { [model] id in model.link = id; model.unlinked = false }
+            mention.triggers = [.task, .tag]
+            mention.provider = MentionProviders.make(store: store, contextTags: { [model] in model.tags }, chosenTags: { [model] in model.tags })
+            mention.onPick = { [model] item in
+                switch item {
+                case .task(let task): model.link = task.id; model.unlinked = false
+                case .tag(let tag):
+                    model.tags = TagText.merge(model.tags, [tag.name])
+                }
+            }
         }
     }
 
@@ -395,7 +408,6 @@ struct QuickCaptureView: View {
                 tags = []
                 model.link = nil
                 model.unlinked = false
-                model.pendingTag = ""
                 ImageIndexer.run(store: store)
             } catch { failure = error.localizedDescription; return }
         }

@@ -72,15 +72,17 @@ public struct DayEntry: Codable, Equatable {
     public var logTaskID: UUID?
     /// 已粘贴、尚未随日志提交的图片。
     public var logDraftImages: [String] = []
+    /// 草稿里用 `#` 选好的标签（日志自己的标签）。
+    public var logDraftTags: [String] = []
     public var deadlines: [Todo] { todos }
     public var deadlineDraft = ""
-    public var hasContent: Bool { !todos.isEmpty || !summary.isEmpty || !deadlineDraft.isEmpty || !logs.isEmpty || !logDraft.isEmpty || logTaskID != nil || !logDraftImages.isEmpty }
+    public var hasContent: Bool { !todos.isEmpty || !summary.isEmpty || !deadlineDraft.isEmpty || !logs.isEmpty || !logDraft.isEmpty || logTaskID != nil || !logDraftImages.isEmpty || !logDraftTags.isEmpty }
     public var completedCount: Int { todos.filter(\.completed).count }
 
     public init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case todos, summary, deadline, deadlines, deadlineDraft, logs, logDraft, logTaskID, logDraftImages
+        case todos, summary, deadline, deadlines, deadlineDraft, logs, logDraft, logTaskID, logDraftImages, logDraftTags
     }
 
     public init(from decoder: Decoder) throws {
@@ -91,6 +93,7 @@ public struct DayEntry: Codable, Equatable {
         logDraft = try values.decodeIfPresent(String.self, forKey: .logDraft) ?? ""
         logTaskID = try values.decodeIfPresent(UUID.self, forKey: .logTaskID)
         logDraftImages = try values.decodeIfPresent([String].self, forKey: .logDraftImages) ?? []
+        logDraftTags = try values.decodeIfPresent([String].self, forKey: .logDraftTags) ?? []
         let legacyItems: [Todo]
         if let items = try values.decodeIfPresent([Todo].self, forKey: .deadlines) {
             legacyItems = items
@@ -112,6 +115,7 @@ public struct DayEntry: Codable, Equatable {
         try values.encode(logDraft, forKey: .logDraft)
         try values.encodeIfPresent(logTaskID, forKey: .logTaskID)
         if !logDraftImages.isEmpty { try values.encode(logDraftImages, forKey: .logDraftImages) }
+        if !logDraftTags.isEmpty { try values.encode(logDraftTags, forKey: .logDraftTags) }
         try values.encode(deadlineDraft, forKey: .deadlineDraft)
     }
 
@@ -385,6 +389,16 @@ public final class JournalStore: ObservableObject {
         change(date, debounce: true) { $0.logTaskID = id }
     }
 
+    /// 草稿里的标签：加一个 / 去掉一个（不区分大小写，已有的不重复）。
+    public func addDraftTag(_ tag: String, on date: Date) {
+        guard let name = TagText.normalize(tag) else { return }
+        change(date, debounce: true) { $0.logDraftTags = TagText.merge($0.logDraftTags, [name]) }
+    }
+
+    public func removeDraftTag(_ tag: String, on date: Date) {
+        change(date, debounce: true) { $0.logDraftTags.removeAll { TagText.key($0) == TagText.key(tag) } }
+    }
+
     /// 批量把日志关联到同一个待办（nil 取消关联），作为一次操作撤销。返回改动的条数。
     @discardableResult
     public func setLogTask(_ taskID: UUID?, forLogs ids: Set<UUID>) -> Int {
@@ -503,10 +517,11 @@ public final class JournalStore: ObservableObject {
         var day = updated[key] ?? DayEntry()
         day.logs.append(DailyLogEntry(createdAt: now, kind: kind, text: text, taskID: linked?.id, taskTitle: title,
                                      taskNumber: linked.flatMap { taskNumber($0.id, on: $0.date) },
-                                     taskTags: linked?.task.tags ?? [], images: images))
+                                     taskTags: linked?.task.tags ?? [], tags: entry.logDraftTags, images: images))
         day.logDraft = ""
         day.logTaskID = nil
         day.logDraftImages = []
+        day.logDraftTags = []
         updated[key] = day
         replaceDays(updated, action: "添加日志")
         return command
@@ -1193,6 +1208,7 @@ public final class JournalStore: ObservableObject {
                 if before.logDraft != after.logDraft, current.logDraft == after.logDraft { current.logDraft = before.logDraft }
                 if before.logTaskID != after.logTaskID, current.logTaskID == after.logTaskID { current.logTaskID = before.logTaskID }
                 if before.logDraftImages != after.logDraftImages, current.logDraftImages == after.logDraftImages { current.logDraftImages = before.logDraftImages }
+                if before.logDraftTags != after.logDraftTags, current.logDraftTags == after.logDraftTags { current.logDraftTags = before.logDraftTags }
                 restored[key] = current.hasContent ? current : nil
             }
             store.replaceDays(restored, action: action, force: true)

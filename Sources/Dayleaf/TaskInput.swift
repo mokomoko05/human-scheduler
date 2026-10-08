@@ -22,7 +22,7 @@ struct TaskInput: NSViewRepresentable {
     var maxLines = 10
     /// 能不能有多行。待办标题这种单行内容为 false：粘贴进来的换行会变成空格（仍然会自动换行显示）。
     var allowsNewlines = true
-    /// 设置后，在开头或空白之后输入 `@` 会弹出待办候选（见 `MentionList`）：↑ ↓ 选择，回车 / Tab 确认，Esc 只关掉候选。
+    /// 设置后，在开头或空白之后输入 `@`（待办）或 `#`（标签）会弹出候选（见 `MentionList`）：↑ ↓ 选择，回车 / Tab 确认，Esc 只关掉候选。
     var mention: MentionState?
 
     private var growing: Bool { minHeight != nil }
@@ -105,13 +105,13 @@ struct TaskInput: NSViewRepresentable {
             guard let mention = parent.mention else { return }
             guard let editor = field?.currentEditor() as? NSTextView else { mention.update(nil); return }
             let selected = editor.selectedRange()
-            mention.update(selected.length == 0 ? MentionToken.find(in: editor.string, caret: selected.location) : nil)
+            mention.update(selected.length == 0 ? MentionToken.find(in: editor.string, caret: selected.location, triggers: mention.triggers) : nil)
         }
 
         /// 选定候选：把 `@xxx` 从输入框里删掉，交给调用方去关联。输入框没有焦点（比如点的是列表）时直接改绑定的文字。
         @discardableResult
         func acceptMention() -> Bool {
-            guard let mention = parent.mention, let (token, id) = mention.take() else { return false }
+            guard let mention = parent.mention, let (token, item) = mention.take() else { return false }
             if let editor = field?.currentEditor() as? NSTextView,
                NSMaxRange(token.range) <= (editor.string as NSString).length {
                 editor.insertText("", replacementRange: token.range)
@@ -120,7 +120,7 @@ struct TaskInput: NSViewRepresentable {
                 let ns = parent.text as NSString
                 if NSMaxRange(token.range) <= ns.length { parent.text = ns.replacingCharacters(in: token.range, with: "") }
             }
-            mention.onPick(id)
+            mention.onPick(item)
             parent.focused = true
             return true
         }

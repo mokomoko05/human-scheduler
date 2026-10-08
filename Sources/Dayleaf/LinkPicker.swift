@@ -128,14 +128,21 @@ struct LinkPickerButton<Label: View>: View {
     }
 }
 
-/// 一条要写的日志会关联到哪个待办，以及怎么改：明确选的 > 专注中的 > 固定关联的；也可以明确「不关联」。
-/// 在输入框里写 `@` 加几个字也能选（见 `MentionList`）。选定的待办可以一键「固定」：之后的日志默认都记到它名下，不计时。
-struct LogLinkBar: View {
+/// 一条要写的日志会关联到哪个待办、带哪些标签：永远只占固定的一行（放不下就横向滚动），所以选了什么都不会让窗口变高。
+/// 关联和标签都在输入框里选：`@` 加几个字选待办，`#` 加几个字选标签（见 `MentionList`）；这里只显示结果，可以点 × 去掉。
+/// 关联的优先级：明确选的 > 专注中的 > 固定的；选定的待办可以一键「固定」，之后的日志默认都记到它名下，不计时。
+struct LogChipsBar: View {
     @ObservedObject var store: JournalStore
     @Binding var link: UUID?
     @Binding var unlinked: Bool
+    @Binding var tags: [String]
     var contextTags: [String] = []
+    /// 这个输入框能不能选待办（任务页里日志固定属于这个任务，不能）。
+    var showsLink = true
+    /// 什么都没选时显示的提示。
+    var hint = ""
     var size: CGFloat = 11
+    static let height: CGFloat = 22
 
     private var explicit: ScheduledTask? { link.flatMap(store.locate) }
 
@@ -143,114 +150,81 @@ struct LogLinkBar: View {
         if let id { link = id; unlinked = false } else { link = nil; unlinked = store.defaultLinkTask != nil }
     }
 
+    private var hasChips: Bool {
+        !tags.isEmpty || (showsLink && (explicit != nil || unlinked || store.defaultLinkTask != nil))
+    }
+
     var body: some View {
-        FlowLayout(spacing: 6) {
-            if let task = explicit {
-                pill("link", FocusHint.label(task), tint: Palette.accent)
-                small("xmark", "取消这次的关联") { link = nil }
-                let pinned = store.pinnedTask?.id == task.id
-                small(pinned ? "pin.fill" : "pin", pinned ? "取消固定" : "固定为当前待办：之后的日志默认都记到它名下（不计时），再点一次取消",
-                      tint: pinned ? Palette.accent : Palette.muted) { store.pinTask(pinned ? nil : task.id) }
-            } else if unlinked {
-                pill("link.badge.plus", "这条不关联待办", tint: Palette.muted)
-                small("arrow.uturn.backward", "恢复自动关联") { unlinked = false }
-            } else if let focus = store.focusTask {
-                pill("timer", "专注中，自动关联 " + FocusHint.label(focus), tint: Palette.success)
-                small("xmark", "这条不关联") { unlinked = true }
-            } else if let pinned = store.pinnedTask {
-                pill("pin.fill", "固定关联 " + FocusHint.label(pinned), tint: Palette.accent)
-                small("pin.slash", "取消固定") { store.pinTask(nil) }
-                small("xmark", "这条不关联") { unlinked = true }
-            }
-            LinkPickerButton(store: store, current: explicit?.id, contextTags: contextTags, pick: choose) {
-                if explicit == nil, !unlinked, store.defaultLinkTask == nil {
-                    Label("@ 关联待办", systemImage: "link").font(.system(size: size)).padding(.horizontal, 8).padding(.vertical, 4)
-                        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Palette.line, style: StrokeStyle(lineWidth: 1, dash: [3])))
-                        .foregroundStyle(Palette.muted)
-                } else {
-                    Text("更换").font(.system(size: size)).foregroundStyle(Palette.muted).padding(.vertical, 4)
+        HStack(spacing: 6) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    if showsLink { linkChips }
+                    ForEach(tags, id: \.self) { tag in tagChip(tag) }
+                    if !hasChips, !hint.isEmpty {
+                        Text(hint).font(.system(size: UIScale.pt(size))).foregroundStyle(Palette.muted).lineLimit(1)
+                    }
                 }
+                .padding(.vertical, 1)
             }
-            .help("选择要关联的待办；也可以在输入框里写 @ 加标题、编号或拼音")
-            .accessibilityLabel("选择关联的待办")
+            if showsLink {
+                LinkPickerButton(store: store, current: explicit?.id, contextTags: contextTags, pick: choose) {
+                    Image(systemName: "link").font(.system(size: UIScale.pt(size))).frame(width: 22, height: 20).contentShape(Rectangle())
+                }
+                .foregroundStyle(Palette.muted).help("用列表选择关联的待办（也可以在输入框里写 @ 加标题、编号或拼音）")
+                .accessibilityLabel("选择关联的待办")
+            }
         }
+        .frame(height: Self.height)
         .disabled(store.isReadOnly)
+    }
+
+    @ViewBuilder
+    private var linkChips: some View {
+        if let task = explicit {
+            pill("link", FocusHint.label(task), tint: Palette.accent)
+            let pinned = store.pinnedTask?.id == task.id
+            small(pinned ? "pin.fill" : "pin", pinned ? "取消固定" : "固定为当前待办：之后的日志默认都记到它名下（不计时），再点一次取消",
+                  tint: pinned ? Palette.accent : Palette.muted) { store.pinTask(pinned ? nil : task.id) }
+            small("xmark", "取消这次的关联") { link = nil }
+        } else if unlinked {
+            pill("link.badge.plus", "这条不关联待办", tint: Palette.muted)
+            small("arrow.uturn.backward", "恢复自动关联") { unlinked = false }
+        } else if let focus = store.focusTask {
+            pill("timer", "专注中 " + FocusHint.label(focus), tint: Palette.success)
+            small("xmark", "这条不关联") { unlinked = true }
+        } else if let pinned = store.pinnedTask {
+            pill("pin.fill", "固定 " + FocusHint.label(pinned), tint: Palette.accent)
+            small("pin.slash", "取消固定") { store.pinTask(nil) }
+            small("xmark", "这条不关联") { unlinked = true }
+        }
+    }
+
+    private func tagChip(_ tag: String) -> some View {
+        Button { tags.removeAll { TagText.key($0) == TagText.key(tag) } } label: {
+            HStack(spacing: 3) {
+                Text("#" + tag).lineLimit(1)
+                Image(systemName: "xmark").font(.system(size: UIScale.pt(8), weight: .semibold))
+            }
+            .font(.system(size: UIScale.pt(size)))
+            .padding(.horizontal, 8).padding(.vertical, 3)
+            .foregroundStyle(Palette.onAccent)
+            .background(Palette.accent, in: RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain).help("去掉标签 #\(tag)").accessibilityLabel("标签 #\(tag)，点按去掉")
     }
 
     private func pill(_ symbol: String, _ text: String, tint: Color) -> some View {
         Label(text, systemImage: symbol).font(.system(size: UIScale.pt(size))).lineLimit(1)
-            .padding(.horizontal, 8).padding(.vertical, 4)
+            .padding(.horizontal, 8).padding(.vertical, 3)
             .foregroundStyle(tint)
             .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
     }
 
     private func small(_ symbol: String, _ help: String, tint: Color = Palette.muted, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Image(systemName: symbol).font(.system(size: UIScale.pt(size))).frame(width: 22, height: 22).contentShape(Rectangle())
+            Image(systemName: symbol).font(.system(size: UIScale.pt(size))).frame(width: 20, height: 20).contentShape(Rectangle())
         }
         .buttonStyle(.plain).foregroundStyle(tint).help(help).accessibilityLabel(help)
-    }
-}
-
-/// 多选标签（快速日志、笔记输入框用）：现有标签是圆角矩形，选中的高亮，点一下切换；也能直接建新标签（会存进标签注册表）。
-struct TagSelectionBar: View {
-    @ObservedObject var store: JournalStore
-    @Binding var selection: [String]
-    var maxVisible = 12
-    /// 「新标签」输入框里的字；传入时由调用方保存（窗口关掉也不丢），不传就只在这个视图里。
-    var draftBinding: Binding<String>?
-    @State private var creating = false
-    @State private var localDraft = ""
-    private var draft: Binding<String> { draftBinding ?? $localDraft }
-    @State private var message: String?
-    @FocusState private var typing: Bool
-
-    private var choices: [String] {
-        let top = store.allTags().prefix(maxVisible).map(\.name)
-        return TagText.merge(selection, Array(top))
-    }
-
-    private func isSelected(_ tag: String) -> Bool { selection.contains { TagText.key($0) == TagText.key(tag) } }
-
-    private func toggle(_ tag: String) {
-        if isSelected(tag) { selection.removeAll { TagText.key($0) == TagText.key(tag) } } else { selection.append(tag) }
-    }
-
-    private func create() {
-        let tags = TagText.parseList(draft.wrappedValue)
-        guard !tags.isEmpty else { message = draft.wrappedValue.isEmpty ? nil : "标签不能含空格，也不能是纯数字"; return }
-        for tag in tags {
-            let name = store.createTag(tag) ?? tag
-            if !isSelected(name) { selection.append(name) }
-        }
-        draft.wrappedValue = ""
-        message = nil
-        creating = false
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            FlowLayout(spacing: 5) {
-                Image(systemName: "tag").font(.system(size: 11)).foregroundStyle(Palette.muted).frame(height: 24)
-                ForEach(choices, id: \.self) { tag in
-                    Button { toggle(tag) } label: { TagChip(name: tag, highlighted: isSelected(tag), size: 11) }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("#\(tag)").accessibilityValue(isSelected(tag) ? "已选中" : "未选中")
-                }
-                Button { creating.toggle(); if creating { typing = true } } label: {
-                    Label("新标签", systemImage: "plus").font(.system(size: 11)).padding(.horizontal, 8).padding(.vertical, 4)
-                        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(Palette.line, style: StrokeStyle(lineWidth: 1, dash: [3])))
-                }.buttonStyle(.plain).foregroundStyle(Palette.muted)
-            }
-            if creating || !draft.wrappedValue.isEmpty {
-                HStack(spacing: 6) {
-                    TextField("新标签名，回车创建（可用 / 分层）", text: draft).textFieldStyle(.plain).focused($typing).onSubmit(create)
-                        .padding(.horizontal, 8).padding(.vertical, 4)
-                        .background(Palette.card, in: RoundedRectangle(cornerRadius: 6))
-                    if let message { Text(message).font(.caption).foregroundStyle(.orange) }
-                }
-            }
-        }
     }
 }
 

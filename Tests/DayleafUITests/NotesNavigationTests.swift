@@ -167,13 +167,12 @@ final class DraftKeepingTests: XCTestCase {
         model.text = "复制来的一大段"
         model.images = ["a.png"]
         model.tags = ["论文"]
-        model.pendingTag = "没回车的新标"
         XCTAssertTrue(model.hasDraft)
         model.mode = .log
         XCTAssertEqual(model.text, "复制来的一大段", "切换模式不丢")
         model.clearDraft()
         XCTAssertFalse(model.hasDraft)
-        XCTAssertTrue(model.images.isEmpty && model.tags.isEmpty && model.pendingTag.isEmpty)
+        XCTAssertTrue(model.images.isEmpty && model.tags.isEmpty)
         model.tags = ["仅标签"]
         XCTAssertTrue(model.hasDraft, "只选了标签也算草稿")
     }

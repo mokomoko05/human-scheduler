@@ -443,10 +443,16 @@ struct DailyLogView: View {
                 }.font(.system(size: UIScale.pt(10))).foregroundStyle(TerminalPalette.muted)
             }
             MentionList(state: mention, store: store)
+            if !entry.logDraftTags.isEmpty {
+                LogChipsBar(store: store, link: .constant(nil), unlinked: .constant(false),
+                            tags: Binding(get: { entry.logDraftTags }, set: { new in
+                                for tag in entry.logDraftTags where !new.contains(tag) { store.removeDraftTag(tag, on: date) }
+                            }), showsLink: false)
+            }
             HStack(spacing: 5) {
                 Text("❯").font(.system(size: UIScale.pt(15), weight: .semibold, design: .monospaced))
                     .foregroundStyle(TerminalPalette.green)
-                TaskInput(text: draft, focused: $focused, placeholder: "记录…  @ 关联待办 · 输入 / 查看命令 · ⌘V 粘贴图片", fontSize: 12, submit: submit,
+                TaskInput(text: draft, focused: $focused, placeholder: "记录…  @ 待办 · # 标签 · / 命令 · ⌘V 贴图", fontSize: 12, submit: submit,
                           monospaced: true, historyUp: historyUp, historyDown: historyDown, complete: completeCommand,
                           onPasteImages: addImages, minHeight: 24, maxLines: 10, mention: mention)
                     .disabled(store.isReadOnly)
@@ -465,8 +471,14 @@ struct DailyLogView: View {
     /// 输入框里的 `@`：选中的待办成为下一条日志的关联（和「关联任务」按钮一样）。
     private func configureMention() {
         let store = store, date = date
-        mention.provider = { query in store.linkCandidates(query: query) }
-        mention.onPick = { id in store.setLogTask(id, on: date) }
+        mention.triggers = [.task, .tag]
+        mention.provider = MentionProviders.make(store: store, chosenTags: { store.entry(for: date).logDraftTags })
+        mention.onPick = { item in
+            switch item {
+            case .task(let task): store.setLogTask(task.id, on: date)
+            case .tag(let tag): store.addDraftTag(tag.name, on: date)
+            }
+        }
     }
 
     private var taskMenu: some View {

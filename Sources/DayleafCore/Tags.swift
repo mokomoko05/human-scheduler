@@ -295,12 +295,17 @@ enum LinkMatcher {
             return task.tags.contains { TagText.matches($0, query: tag) } ? 2 : nil
         }
         let title = String(TaskText.rendered(task.title, alias: task.calendarName).characters)
+        return textQuality(title, rawTitle: task.title, tags: task.tags, query: query)
+    }
+
+    /// 文字与查询词的匹配质量（1 开头 / 词开头；2 包含；3 拼音或首字母；4 漏字模糊），不匹配为 nil。
+    static func textQuality(_ title: String, rawTitle: String? = nil, tags: [String] = [], query: String) -> Int? {
         let needle = query.lowercased()
         let lower = title.lowercased()
         if lower.hasPrefix(needle) { return 1 }
         if lower.split(whereSeparator: { $0.isWhitespace || $0.isPunctuation }).contains(where: { $0.hasPrefix(needle) }) { return 1 }
-        if title.localizedStandardContains(query) || task.title.localizedStandardContains(query)
-            || task.tags.contains(where: { $0.localizedStandardContains(query) }) { return 2 }
+        if title.localizedStandardContains(query) || (rawTitle?.localizedStandardContains(query) ?? false)
+            || tags.contains(where: { $0.localizedStandardContains(query) }) { return 2 }
         let compact = needle.filter { !$0.isWhitespace }
         if !compact.isEmpty, compact.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) {
             let py = pinyin(title)
@@ -318,6 +323,41 @@ enum LinkMatcher {
             if !found { return false }
         }
         return true
+    }
+}
+
+// MARK: - 标签候选（输入框里的 # 补全）
+
+public struct TagCandidate: Identifiable, Equatable {
+    public let name: String
+    /// 还不存在，选中就是新建。
+    public let isNew: Bool
+    public let taskCount: Int
+    public let noteCount: Int
+    public var id: String { (isNew ? "new:" : "tag:") + TagText.key(name) }
+}
+
+extension JournalStore {
+    /// `#` 补全的候选：已有标签按匹配质量（开头 > 包含 > 拼音 > 漏字）和最近使用排序；`query` 是合法的新标签名时，最后加一项「新建」。
+    /// `excluding` 是已经选了的标签。查询词是纯数字（任务编号）时没有候选。
+    public func tagCandidates(query: String, excluding: [String] = [], limit: Int = 6) -> [TagCandidate] {
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        if !trimmed.isEmpty, trimmed.allSatisfy(\.isNumber) { return [] }
+        let chosen = Set(excluding.map(TagText.key))
+        let all = allTags().filter { !chosen.contains($0.id) }
+        var matched: [(TagSummary, Int, Int)] = []
+        for (index, summary) in all.enumerated() {
+            if trimmed.isEmpty { matched.append((summary, 1, index)); continue }
+            if let quality = LinkMatcher.textQuality(summary.name, query: trimmed) { matched.append((summary, quality, index)) }
+        }
+        matched.sort { ($0.1, $0.2) < ($1.1, $1.2) }
+        var result = matched.prefix(limit).map { TagCandidate(name: $0.0.name, isNew: false, taskCount: $0.0.taskCount, noteCount: $0.0.noteCount) }
+        if let name = TagText.normalize(trimmed), !trimmed.hasSuffix("/"),
+           !allTags().contains(where: { $0.id == TagText.key(name) }), !chosen.contains(TagText.key(name)) {
+            if result.count >= limit { result.removeLast() }
+            result.append(TagCandidate(name: name, isNew: true, taskCount: 0, noteCount: 0))
+        }
+        return result
     }
 }
 

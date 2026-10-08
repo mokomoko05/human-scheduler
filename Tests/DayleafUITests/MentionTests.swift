@@ -17,6 +17,10 @@ final class MentionTests: XCTestCase {
         return store
     }
 
+    private func numbers(_ state: MentionState) -> [Int] {
+        state.results.compactMap { if case .task(let t) = $0 { return t.task.number } else { return nil } }
+    }
+
     // MARK: - 词元
 
     func testTokenNeedsAtAtWordStartAndCaretRightAfter() {
@@ -40,9 +44,9 @@ final class MentionTests: XCTestCase {
     func testStateListsCandidatesNavigatesAndRespectsDismiss() {
         let store = makeStore()
         let state = MentionState()
-        state.provider = { store.linkCandidates(query: $0) }
+        state.provider = MentionProviders.make(store: store)
         var picked: UUID?
-        state.onPick = { picked = $0 }
+        state.onPick = { if case .task(let t) = $0 { picked = t.id } }
 
         state.update(MentionToken(range: NSRange(location: 0, length: 1), query: ""))
         XCTAssertTrue(state.isActive)
@@ -53,7 +57,7 @@ final class MentionTests: XCTestCase {
         XCTAssertEqual(state.selection, 2, "到头后循环")
 
         state.update(MentionToken(range: NSRange(location: 0, length: 3), query: "zb"))
-        XCTAssertEqual(state.results.compactMap(\.task.number), [2], "按拼音首字母缩小")
+        XCTAssertEqual(numbers(state), [2], "按拼音首字母缩小")
         XCTAssertEqual(state.selection, 0, "查询变了，选择回到第一个")
 
         state.dismiss()
@@ -66,7 +70,7 @@ final class MentionTests: XCTestCase {
 
         let expected = state.results[state.selection].id
         let taken = state.take()
-        XCTAssertEqual(taken?.id, expected)
+        XCTAssertEqual(taken?.item.id, expected)
         XCTAssertFalse(state.isActive, "取走之后关闭")
         XCTAssertNil(picked, "take 只取走，不触发 onPick（由输入框删掉 @ 之后再调）")
     }
@@ -74,7 +78,7 @@ final class MentionTests: XCTestCase {
     func testNoMatchHidesTheList() {
         let store = makeStore()
         let state = MentionState()
-        state.provider = { store.linkCandidates(query: $0) }
+        state.provider = MentionProviders.make(store: store)
         state.update(MentionToken(range: NSRange(location: 0, length: 6), query: "完全没有"))
         XCTAssertFalse(state.isActive, "没有候选时不显示空列表，回车照常提交")
         XCTAssertNil(state.take())
@@ -104,13 +108,13 @@ final class MentionTests: XCTestCase {
     func testTypingAtOpensListAndAcceptingRemovesTheTokenAndPicksTheTask() throws {
         let store = makeStore()
         let state = MentionState()
-        state.provider = { store.linkCandidates(query: $0) }
+        state.provider = MentionProviders.make(store: store)
         var picked: UUID?
-        state.onPick = { picked = $0 }
+        state.onPick = { if case .task(let t) = $0 { picked = t.id } }
         let (field, coordinator, value) = makeField(text: "今天读了 @zb", mention: state)
         coordinator.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
         XCTAssertTrue(state.isActive)
-        XCTAssertEqual(state.results.first?.task.number, 2)
+        XCTAssertEqual(numbers(state).first, 2)
 
         XCTAssertTrue(coordinator.acceptMention())
         XCTAssertEqual(picked, store.locate(number: 2)?.id, "选中的是「写周报」")
@@ -121,9 +125,9 @@ final class MentionTests: XCTestCase {
     func testEnterAcceptsWhileListIsOpenAndSubmitsOtherwise() throws {
         let store = makeStore()
         let state = MentionState()
-        state.provider = { store.linkCandidates(query: $0) }
+        state.provider = MentionProviders.make(store: store)
         var picked: UUID?
-        state.onPick = { picked = $0 }
+        state.onPick = { if case .task(let t) = $0 { picked = t.id } }
         var submitted = 0
         let (field, coordinator, value) = makeField(text: "@", mention: state, onSubmit: { submitted += 1 })
         let editor = try XCTUnwrap(field.currentEditor() as? NSTextView)
@@ -145,7 +149,7 @@ final class MentionTests: XCTestCase {
     func testEscapeClosesOnlyTheListAndTabAlsoAccepts() throws {
         let store = makeStore()
         let state = MentionState()
-        state.provider = { store.linkCandidates(query: $0) }
+        state.provider = MentionProviders.make(store: store)
         var picked = 0
         state.onPick = { _ in picked += 1 }
         let (field, coordinator, value) = makeField(text: "@", mention: state)
@@ -168,9 +172,9 @@ final class MentionTests: XCTestCase {
     func testClickingARowAcceptsItEvenWhenFieldLostFocus() throws {
         let store = makeStore()
         let state = MentionState()
-        state.provider = { store.linkCandidates(query: $0) }
+        state.provider = MentionProviders.make(store: store)
         var picked: UUID?
-        state.onPick = { picked = $0 }
+        state.onPick = { if case .task(let t) = $0 { picked = t.id } }
         let (field, coordinator, value) = makeField(text: "读 @fp", mention: state)
         coordinator.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
         coordinator.bindMention()
@@ -186,11 +190,11 @@ final class MentionTests: XCTestCase {
         let store = makeStore()
         store.pinTask(store.locate(number: 2)!.id)
         let state = MentionState()
-        state.provider = { store.linkCandidates(query: $0, contextTags: ["论文"]) }
+        state.provider = MentionProviders.make(store: store, contextTags: { ["论文"] })
         state.update(MentionToken(range: NSRange(location: 0, length: 1), query: ""))
         let view = VStack {
             MentionList(state: state, store: store, contextTags: ["论文"])
-            LogLinkBar(store: store, link: .constant(nil), unlinked: .constant(false))
+            LogChipsBar(store: store, link: .constant(nil), unlinked: .constant(false), tags: .constant(["论文"]))
         }.frame(width: 480)
         let host = NSHostingView(rootView: view)
         let window = QuietWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 300), styleMask: [.titled], backing: .buffered, defer: false)
@@ -199,6 +203,65 @@ final class MentionTests: XCTestCase {
         host.layoutSubtreeIfNeeded()
         Self.keepAlive += [window, host]
         XCTAssertGreaterThan(host.fittingSize.height, 100, "三行候选 + 提示 + 关联条")
-        XCTAssertEqual(state.results.first?.task.number, 2, "固定的排在带上下文标签的之前")
+        XCTAssertEqual(numbers(state).first, 2, "固定的排在带上下文标签的之前")
+    }
+
+    // MARK: - # 标签
+
+    func testHashTriggerFindsTagsOnlyWhenEnabledAndAtWordStart() {
+        let both: Set<MentionTrigger> = [.task, .tag]
+        XCTAssertEqual(MentionToken.find(in: "读了 #论", caret: 5, triggers: both)?.trigger, .tag)
+        XCTAssertEqual(MentionToken.find(in: "读了 #论", caret: 5, triggers: both)?.query, "论")
+        XCTAssertNil(MentionToken.find(in: "读了 #论", caret: 5), "默认只认 @")
+        XCTAssertNil(MentionToken.find(in: "C#", caret: 2, triggers: both), "C# 里的 # 不触发")
+        XCTAssertEqual(MentionToken.find(in: "＃论文", caret: 3, triggers: both)?.trigger, .tag, "全角 ＃ 也算")
+        XCTAssertEqual(MentionToken.find(in: "@zb #", caret: 5, triggers: both)?.trigger, .tag, "取光标前最近的一个")
+    }
+
+    func testTagCandidatesRankExcludeAndOfferCreate() {
+        let store = makeStore()
+        store.createTag("读书笔记")
+        _ = store.addParsedTodo("看公式 #论文/方法", on: day)
+        func names(_ query: String, excluding: [String] = []) -> [String] {
+            store.tagCandidates(query: query, excluding: excluding).map { ($0.isNew ? "+" : "") + $0.name }
+        }
+        XCTAssertEqual(names("论"), ["论文", "论文/方法", "+论"], "开头匹配的已有标签在前，最后一项是新建")
+        XCTAssertEqual(names("论文"), ["论文", "论文/方法"], "和已有标签完全一致时不再提供新建")
+        XCTAssertEqual(names("dsbj"), ["读书笔记", "+dsbj"], "拼音首字母")
+        XCTAssertEqual(names("论", excluding: ["论文"]), ["论文/方法", "+论"], "已选的不再出现")
+        XCTAssertEqual(names("3"), [], "纯数字是任务编号，不是标签")
+        XCTAssertTrue(names("").allSatisfy { !$0.hasPrefix("+") }, "只有 # 时列出已有标签，不提供新建")
+    }
+
+    func testPickingATagRemovesHashTokenAndReportsIt() throws {
+        let store = makeStore()
+        let state = MentionState()
+        state.triggers = [.task, .tag]
+        state.provider = MentionProviders.make(store: store)
+        var tags: [String] = []
+        state.onPick = { if case .tag(let tag) = $0 { tags.append(tag.name) } }
+        let (field, coordinator, value) = makeField(text: "今天读了 #论", mention: state)
+        coordinator.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification, object: field))
+        XCTAssertTrue(state.isActive)
+        XCTAssertEqual(state.token?.trigger, .tag)
+        XCTAssertTrue(coordinator.acceptMention())
+        XCTAssertEqual(tags, ["论文"])
+        XCTAssertEqual(value(), "今天读了 ")
+    }
+
+    func testChosenTagsAndLinkNeverChangeTheQuickPanelHeight() {
+        let store = makeStore()
+        let model = QuickCaptureModel()
+        model.mode = .log
+        func height() -> CGFloat {
+            let host = NSHostingView(rootView: QuickCaptureView(store: store, model: model, close: {}, resize: { _ in }))
+            host.setFrameSize(NSSize(width: 520, height: 160))
+            host.layoutSubtreeIfNeeded()
+            return host.fittingSize.height
+        }
+        let bare = height()
+        model.tags = ["论文", "读书笔记", "很长很长的标签名称一二三四五六七", "甲", "乙", "丙", "丁"]
+        model.link = store.locate(number: 1)?.id
+        XCTAssertEqual(height(), bare, accuracy: 0.5, "选了标签和待办，窗口高度不变，不用再「展开」")
     }
 }

@@ -25,6 +25,8 @@ struct NotesView: View {
     @State private var error: String?
     /// 标签页输入框里的 `@` 补全。
     @StateObject private var tagMention = MentionState()
+    /// 任务页输入框里的 `#`（任务页的日志固定属于这个任务，只能选标签）。
+    @StateObject private var taskMention = MentionState()
 
     private var selection: UUID? { get { nav.selection } nonmutating set { nav.selection = newValue } }
     private var tagSelection: String? { get { nav.tagSelection } nonmutating set { nav.tagSelection = newValue } }
@@ -99,13 +101,27 @@ struct NotesView: View {
         }
     }
 
-    /// 标签页里 `@` 的候选：正在写的标签名下的待办排前面；选中后记进这个标签的草稿。
+    /// 输入框里 `@` / `#` 的候选：标签页里，正在写的标签名下的待办排前面；选中后记进对应输入框的草稿。
     private func configureMention() {
         let nav = nav, store = store
-        tagMention.provider = { query in store.linkCandidates(query: query, contextTags: nav.tagSelection.map { [$0] } ?? []) }
-        tagMention.onPick = { id in
-            guard let tag = nav.tagSelection else { return }
-            nav.updateDraft(NotesNavigation.draftKey(tag: tag)) { $0.link = id; $0.unlinked = false }
+        func key() -> String? { nav.tagSelection.map { NotesNavigation.draftKey(tag: $0) } ?? nav.selection.map { NotesNavigation.draftKey(task: $0) } }
+        func chosen() -> [String] { key().map { nav.draft($0).tags } ?? [] }
+        tagMention.triggers = [.task, .tag]
+        tagMention.provider = MentionProviders.make(store: store, contextTags: { nav.tagSelection.map { [$0] } ?? [] }, chosenTags: {
+            chosen() + (nav.tagSelection.map { [$0] } ?? [])
+        })
+        tagMention.onPick = { item in
+            guard let key = key() else { return }
+            switch item {
+            case .task(let task): nav.updateDraft(key) { $0.link = task.id; $0.unlinked = false }
+            case .tag(let tag): nav.updateDraft(key) { $0.tags = TagText.merge($0.tags, [tag.name]) }
+            }
+        }
+        taskMention.triggers = [.tag]
+        taskMention.provider = MentionProviders.make(store: store, chosenTags: chosen)
+        taskMention.onPick = { item in
+            guard let key = key(), case .tag(let tag) = item else { return }
+            nav.updateDraft(key) { $0.tags = TagText.merge($0.tags, [tag.name]) }
         }
     }
 
@@ -659,6 +675,7 @@ struct NotesView: View {
         let text = nav.draft(key).text
         let link = Binding<UUID?>(get: { nav.draft(key).link }, set: { value in nav.updateDraft(key) { $0.link = value } })
         let unlinked = Binding<Bool>(get: { nav.draft(key).unlinked }, set: { value in nav.updateDraft(key) { $0.unlinked = value } })
+        let tags = Binding<[String]>(get: { nav.draft(key).tags }, set: { value in nav.updateDraft(key) { $0.tags = value } })
         return VStack(alignment: .leading, spacing: 6) {
             if !pending.isEmpty {
                 PendingImagesStrip(store: store, names: pending,
@@ -669,7 +686,7 @@ struct NotesView: View {
             HStack(spacing: 8) {
                 Image(systemName: "square.and.pencil").foregroundStyle(Palette.accent)
                 TaskInput(text: textBinding(key), focused: $tagFocused,
-                          placeholder: "写进 #\(tag)，回车保存 · @ 关联待办 · ⌘V 粘贴图片",
+                          placeholder: "写进 #\(tag)，回车保存 · @ 关联待办 · # 加标签 · ⌘V 贴图",
                           fontSize: 13, submit: { submitTag(tag) }, onPasteImages: { datas in
                     addImages(ImageTools.save(datas, in: store), to: key)
                     tagFocused = true
@@ -680,7 +697,7 @@ struct NotesView: View {
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(Palette.card, in: RoundedRectangle(cornerRadius: 8))
-            LogLinkBar(store: store, link: link, unlinked: unlinked, contextTags: [tag])
+            LogChipsBar(store: store, link: link, unlinked: unlinked, tags: tags, contextTags: [tag])
             if let error {
                 Text(error).font(.system(size: 11)).foregroundStyle(error.hasPrefix("已") ? Palette.success : Palette.deadline)
             }
@@ -694,7 +711,7 @@ struct NotesView: View {
         let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !draft.images.isEmpty else { return }
         do {
-            let command = try store.quickLog(text, images: draft.images, taskID: draft.link, linkDefault: !draft.unlinked, tags: [tag], on: Date())
+            let command = try store.quickLog(text, images: draft.images, taskID: draft.link, linkDefault: !draft.unlinked, tags: TagText.merge([tag], draft.tags), on: Date())
             guard case .entry = command else { error = "这里只能写笔记，不支持 \(text) 这类命令。"; return }
             nav.clearDraft(key)
             error = nil
@@ -728,26 +745,31 @@ struct NotesView: View {
         let key = taskDraftKey(topic.id)
         let pending = images(key)
         let text = nav.draft(key).text
+        let tags = Binding<[String]>(get: { nav.draft(key).tags }, set: { value in nav.updateDraft(key) { $0.tags = value } })
         return VStack(alignment: .leading, spacing: 6) {
             if !pending.isEmpty {
                 PendingImagesStrip(store: store, names: pending,
                                    remove: { name in removeImage(name, from: key) },
                                    preview: { previewing = ImagePreviewItem(names: pending, index: $0) })
             }
+            MentionList(state: taskMention, store: store)
             HStack(spacing: 8) {
                 Image(systemName: "square.and.pencil").foregroundStyle(Palette.accent)
                 TaskInput(text: textBinding(key), focused: $focused,
-                          placeholder: topic.deleted ? "任务已删除，无法追加笔记" : "给 \(topic.number.map { "#\($0)" } ?? "这个任务") 追加笔记，回车保存，⌘V 粘贴图片",
+                          placeholder: topic.deleted ? "任务已删除，无法追加笔记" : "给 \(topic.number.map { "#\($0)" } ?? "这个任务") 追加笔记，回车保存 · # 加标签 · ⌘V 贴图",
                           fontSize: 13, submit: { submit(topic) }, onPasteImages: { datas in
                     addImages(ImageTools.save(datas, in: store), to: key)
                     focused = true
-                }, minHeight: 24, maxLines: 10).disabled(topic.deleted || store.isReadOnly)
+                }, minHeight: 24, maxLines: 10, mention: taskMention).disabled(topic.deleted || store.isReadOnly)
                 Button { submit(topic) } label: { Image(systemName: "arrow.turn.down.left") }
                     .buttonStyle(HitAreaButtonStyle())
                     .disabled(topic.deleted || store.isReadOnly || (text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && pending.isEmpty))
             }
             .padding(.horizontal, 12).padding(.vertical, 6)
             .background(Palette.card, in: RoundedRectangle(cornerRadius: 8))
+            if !tags.wrappedValue.isEmpty {
+                LogChipsBar(store: store, link: .constant(nil), unlinked: .constant(false), tags: tags, showsLink: false)
+            }
             if let error {
                 Text(error).font(.system(size: 11)).foregroundStyle(error.hasPrefix("已") ? Palette.success : Palette.deadline)
             }
@@ -761,7 +783,7 @@ struct NotesView: View {
         let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty || !draft.images.isEmpty else { return }
         do {
-            let command = try store.quickLog(text, images: draft.images, taskID: topic.id, on: Date())
+            let command = try store.quickLog(text, images: draft.images, taskID: topic.id, tags: draft.tags, on: Date())
             guard case .entry = command else { error = "这里只能写笔记，不支持 \(text) 这类命令。"; return }
             nav.clearDraft(key)
             error = nil
