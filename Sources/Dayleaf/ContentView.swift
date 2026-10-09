@@ -345,8 +345,10 @@ struct ContentView: View {
             let items = open.filter(belongs)
             return items.isEmpty ? nil : TaskGroup(id: id, title: title, tint: tint, items: items)
         }
-        let done = tasks.filter { $0.task.completed }
+        let done = tasks.filter { $0.task.isDone }
         if !done.isEmpty { result.append(TaskGroup(id: "done", title: "已完成", tint: Palette.success, items: done)) }
+        let dropped = tasks.filter { $0.task.isDropped }
+        if !dropped.isEmpty { result.append(TaskGroup(id: "dropped", title: "已放弃", tint: Palette.muted, items: dropped)) }
         return result
     }
 
@@ -368,7 +370,7 @@ struct ContentView: View {
                             .padding(.horizontal, 7).padding(.vertical, 2)
                             .background(Palette.soft, in: Capsule())
                     }
-                    .buttonStyle(.plain).foregroundStyle(Palette.accent)
+                    .buttonStyle(.plain).foregroundStyle(Palette.accent).raisedOnHover(radius: 10)
                     .help("已完成的事项被隐藏，点击显示").accessibilityLabel("显示已隐藏的 \(hidden) 项已完成事项")
                 }
                 Text("\(completed) / \(all.count)")
@@ -449,6 +451,9 @@ struct ContentView: View {
             }
             .padding(11)
             .background(Palette.background, in: RoundedRectangle(cornerRadius: 10))
+            // 输入框：平时一道淡边，正在输入时变成强调色的光圈。
+            .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(addingTodo ? Palette.accent.opacity(0.7) : Palette.line.opacity(0.6), lineWidth: addingTodo ? 1.5 : 0.75).allowsHitTesting(false))
+            .animation(Motion.quick, value: addingTodo)
             .animation(Motion.quick, value: QuickAdd.parse(draft.wrappedValue).hasSchedule || !QuickAdd.parse(draft.wrappedValue).tags.isEmpty)
         }
         .disabled(store.isReadOnly)
@@ -563,7 +568,7 @@ struct ContentView: View {
                 Text(selectedDate.relativeLabel).fontWeight(.semibold)
                 let due = store.calendarDeadlines[JournalDates.key(selectedDate)] ?? []
                 if !due.isEmpty {
-                    Text("\(due.filter(\.task.completed).count)/\(due.count)").font(.system(size: UIScale.pt(10), design: .monospaced))
+                    Text("\(due.filter(\.task.isDone).count)/\(due.filter { !$0.task.isDropped }.count)").font(.system(size: UIScale.pt(10), design: .monospaced))
                 }
             }
             .font(.system(size: UIScale.pt(11)))

@@ -4,7 +4,7 @@ import SwiftUI
 
 /// 全局快捷键的动作。
 enum HotKeyAction: String, CaseIterable, Identifiable {
-    case main, shell, log, notes
+    case main, shell, log, notes, focusPanel
     var id: String { rawValue }
 
     var title: String {
@@ -13,11 +13,12 @@ enum HotKeyAction: String, CaseIterable, Identifiable {
         case .shell: return "打开 / 隐藏内置终端"
         case .log: return "快速写日志"
         case .notes: return "打开 / 关闭笔记"
+        case .focusPanel: return "显示 / 隐藏专注计时"
         }
     }
 
     var identifier: UInt32 {
-        switch self { case .log: return 2; case .main: return 3; case .shell: return 4; case .notes: return 5 }
+        switch self { case .log: return 2; case .main: return 3; case .shell: return 4; case .notes: return 5; case .focusPanel: return 6 }
     }
 
     var defaultBinding: HotKeyBinding {
@@ -26,6 +27,7 @@ enum HotKeyAction: String, CaseIterable, Identifiable {
         case .shell: return HotKeyBinding(keyCode: kVK_ANSI_T, modifiers: HotKeyBinding.controlOption)
         case .log: return HotKeyBinding(keyCode: kVK_ANSI_L, modifiers: HotKeyBinding.controlOption)
         case .notes: return HotKeyBinding(keyCode: kVK_ANSI_N, modifiers: controlKey)
+        case .focusPanel: return HotKeyBinding(keyCode: kVK_ANSI_F, modifiers: HotKeyBinding.controlOption)
         }
     }
 

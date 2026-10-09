@@ -52,6 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var hotKeysAttempted = false
     private let logHotKey = GlobalHotKey(action: .log)
     private let notesHotKey = GlobalHotKey(action: .notes)
+    private let focusHotKey = GlobalHotKey(action: .focusPanel)
     private let mainHotKey = GlobalHotKey(action: .main)
     private let shellHotKey = GlobalHotKey(action: .shell)
     private let shell = ShellWindowController()
@@ -119,6 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             quickCapture.installStatusItem()
             logHotKey.onPress = { [weak self] in self?.quickCapture.toggle(.log) }
             notesHotKey.onPress = { [weak self] in self?.toggleNotesGlobally() }
+            focusHotKey.onPress = { FocusPanelStyle.toggleHidden() }
             mainHotKey.onPress = { [weak self] in self?.toggleMainWindow() }
             shellHotKey.onPress = { [weak self] in self?.shell.toggle() }
             applyHotKeyPreference()
@@ -267,7 +269,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     // MARK: - 全局快捷键
 
     private var allHotKeys: [(HotKeyAction, GlobalHotKey)] {
-        [(.main, mainHotKey), (.shell, shellHotKey), (.log, logHotKey), (.notes, notesHotKey)]
+        [(.main, mainHotKey), (.shell, shellHotKey), (.log, logHotKey), (.notes, notesHotKey), (.focusPanel, focusHotKey)]
     }
 
     /// 被其他应用占用而注册失败的动作，设置里据此逐条提示。

@@ -15,6 +15,11 @@ enum Prefs {
     /// 专注不足这么多分钟就不在日志里留记录（0 表示都记）。
     static let focusMinLogMinutes = "focusMinLogMinutes"
     static let defaultFocusMinLogMinutes = 5
+    /// 专注计时窗口的样式（`FocusPanelStyle.rawValue`）和是否隐藏（专注照常进行，只是不显示）。
+    static let focusPanelStyle = "focusPanelStyle"
+    static let focusPanelHidden = "focusPanelHidden"
+    /// 浮动计时窗口被拖到哪里：窗口左上角。
+    static let focusPanelTopLeft = "focusPanelTopLeft"
     static var focusMinLogSeconds: TimeInterval {
         let defaults = UserDefaults.standard
         let minutes = defaults.object(forKey: focusMinLogMinutes) == nil ? defaultFocusMinLogMinutes : defaults.integer(forKey: focusMinLogMinutes)

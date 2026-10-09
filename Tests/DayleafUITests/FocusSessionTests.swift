@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import XCTest
 import DayleafCore
 @testable import Dayleaf
@@ -296,5 +297,128 @@ final class FocusSessionTests: XCTestCase {
         XCTAssertEqual(FocusSession.duration(3725), "1 小时 2 分 5 秒")
         XCTAssertEqual(FocusSession.clock(65), "01:05")
         XCTAssertEqual(FocusSession.clock(3725), "1:02:05")
+    }
+}
+
+/// 专注计时窗口的样式与隐藏。
+@MainActor
+final class FocusPanelStyleTests: XCTestCase {
+    override func setUp() async throws {
+        // 先建好应用对象：直接从 NSPanel 的初始化里首次创建它会重入而崩溃。
+        _ = NSApplication.shared
+    }
+
+    private func makeDefaults() -> UserDefaults {
+        let suite = "focus-panel-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suite)
+            try? FileManager.default.removeItem(at: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Preferences/\(suite).plist"))
+        }
+        return defaults
+    }
+
+    private func makeSession() throws -> (FocusSession, ScheduledTask) {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = JournalStore(directory: directory)
+        let task = try XCTUnwrap(store.addParsedTodo("读论文 [链接](https://example.com/a)", on: Date()))
+        let session = FocusSession()
+        session.store = store
+        session.openLink = { _ in }
+        session.activateExistingTab = { _ in false }
+        return (session, task)
+    }
+
+    func testEveryStyleHasATitleAndOnlyMenuBarHasNoFloatingWindow() {
+        XCTAssertEqual(FocusPanelStyle.allCases.count, 5)
+        XCTAssertEqual(Set(FocusPanelStyle.allCases.map(\.title)).count, 5)
+        XCTAssertNil(FocusPanelStyle.menuBar.panelSize)
+        for style in FocusPanelStyle.allCases where style != .menuBar {
+            let size = style.panelSize
+            XCTAssertNotNil(size)
+            XCTAssertLessThanOrEqual(size!.width, FocusPanelStyle.card.panelSize!.width, "\(style.title) 不比卡片大")
+        }
+    }
+
+    func testVisibilityRulesCombineActiveHiddenAndStyle() {
+        for style in FocusPanelStyle.allCases {
+            XCTAssertFalse(FocusPanelStyle.floatingVisible(active: false, hidden: false, style: style), "没在专注就什么都不显示")
+            XCTAssertFalse(FocusPanelStyle.floatingVisible(active: true, hidden: true, style: style), "隐藏时什么都不显示")
+            XCTAssertFalse(FocusPanelStyle.menuBarVisible(active: true, hidden: true, style: style))
+        }
+        XCTAssertTrue(FocusPanelStyle.floatingVisible(active: true, hidden: false, style: .pill))
+        XCTAssertFalse(FocusPanelStyle.floatingVisible(active: true, hidden: false, style: .menuBar), "菜单栏样式不开浮窗")
+        XCTAssertTrue(FocusPanelStyle.menuBarVisible(active: true, hidden: false, style: .menuBar))
+        XCTAssertFalse(FocusPanelStyle.menuBarVisible(active: true, hidden: false, style: .card))
+    }
+
+    func testControllerFollowsSessionStyleAndHiddenPreferences() async throws {
+        let defaults = makeDefaults()
+        let (session, task) = try makeSession()
+        let controller = FocusPanelController(session: session, defaults: defaults)
+        XCTAssertFalse(controller.isPanelVisible)
+
+        session.start(task: task, url: URL(string: "https://example.com/a")!)
+        XCTAssertTrue(controller.isPanelVisible, "默认卡片样式：开始专注就显示浮窗")
+        XCTAssertFalse(controller.showsMenuBarTimer)
+
+        defaults.set(true, forKey: Prefs.focusPanelHidden)
+        controller.refresh()
+        XCTAssertFalse(controller.isPanelVisible, "隐藏：专注还在，窗口没了")
+        XCTAssertNotNil(session.active, "隐藏不影响专注本身")
+        defaults.set(false, forKey: Prefs.focusPanelHidden)
+        controller.refresh()
+        XCTAssertTrue(controller.isPanelVisible)
+
+        defaults.set(FocusPanelStyle.menuBar.rawValue, forKey: Prefs.focusPanelStyle)
+        controller.refresh()
+        XCTAssertFalse(controller.isPanelVisible, "菜单栏样式不开浮窗")
+        XCTAssertTrue(controller.showsMenuBarTimer)
+
+        defaults.set(true, forKey: Prefs.focusPanelHidden)
+        controller.refresh()
+        XCTAssertFalse(controller.showsMenuBarTimer, "隐藏时菜单栏里也没有")
+        defaults.set(false, forKey: Prefs.focusPanelHidden)
+        defaults.set(FocusPanelStyle.dot.rawValue, forKey: Prefs.focusPanelStyle)
+        controller.refresh()
+        XCTAssertTrue(controller.isPanelVisible)
+        XCTAssertFalse(controller.showsMenuBarTimer)
+
+        session.stop(reason: "手动结束")
+        XCTAssertFalse(controller.isPanelVisible, "结束专注后窗口消失")
+        XCTAssertFalse(controller.showsMenuBarTimer)
+    }
+
+    func testToggleHiddenFlipsTheStoredPreferenceAndUnknownStyleFallsBackToCard() {
+        let defaults = UserDefaults.standard
+        let before = defaults.object(forKey: Prefs.focusPanelHidden)
+        addTeardownBlock { if let before { defaults.set(before, forKey: Prefs.focusPanelHidden) } else { defaults.removeObject(forKey: Prefs.focusPanelHidden) } }
+        defaults.set(false, forKey: Prefs.focusPanelHidden)
+        FocusPanelStyle.toggleHidden()
+        XCTAssertTrue(FocusPanelStyle.hidden)
+        FocusPanelStyle.toggleHidden()
+        XCTAssertFalse(FocusPanelStyle.hidden)
+        XCTAssertNil(FocusPanelStyle(rawValue: "nonsense"))
+    }
+
+    func testEveryStyleRendersAtItsPanelSize() throws {
+        let (session, task) = try makeSession()
+        session.start(task: task, url: URL(string: "https://example.com/a")!)
+        addTeardownBlock { session.stop(reason: "测试结束") }
+        for style in FocusPanelStyle.allCases {
+            guard let size = style.panelSize else { continue }
+            UserDefaults.standard.set(style.rawValue, forKey: Prefs.focusPanelStyle)
+            let host = NSHostingView(rootView: FocusPanelView(session: session))
+            host.setFrameSize(size)
+            let window = QuietWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.borderless], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false
+            window.contentView = host
+            host.layoutSubtreeIfNeeded()
+            XCTAssertLessThanOrEqual(host.fittingSize.width, size.width + 1, "\(style.title) 的内容放得进窗口")
+            XCTAssertLessThanOrEqual(host.fittingSize.height, size.height + 1)
+            XCTAssertGreaterThan(host.fittingSize.height, 6)
+        }
+        UserDefaults.standard.removeObject(forKey: Prefs.focusPanelStyle)
     }
 }

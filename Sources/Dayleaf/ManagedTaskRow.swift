@@ -18,22 +18,24 @@ struct ManagedTaskRow: View {
     var select: () -> Void = {}
     @State private var showingDetails = false
     @State private var showingTags = false
+    @State private var hovered = false
 
     private var selected: Bool { interaction.selectedTaskID == task.id || dragSession.activeID == task.id }
 
     var body: some View {
         HStack(alignment: .center, spacing: 4) {
             Button { selectTask(); store.toggleTodo(task.id, on: date) } label: {
-                Image(systemName: task.completed ? "checkmark.circle.fill" : "circle")
+                Image(systemName: task.isDropped ? "xmark.circle.fill" : (task.completed ? "checkmark.circle.fill" : "circle"))
                     .font(.system(size: UIScale.pt(compact ? 14 : 17), weight: .light))
-                    .foregroundStyle(task.completed ? Palette.success : Palette.muted)
+                    .foregroundStyle(task.isDropped ? Palette.muted : (task.completed ? Palette.success : Palette.muted))
                     .frame(width: 18, height: 22)
                     .id(task.completed)
                     .transition(Motion.reduced ? .identity : .scale(scale: 0.4).combined(with: .opacity))
                     .animation(Motion.spring, value: task.completed)
             }
             .buttonStyle(HitAreaButtonStyle())
-            .accessibilityLabel((task.completed ? "标记未完成：" : "标记完成：") + task.title)
+            .accessibilityLabel((task.isDropped ? "恢复已放弃的待办：" : (task.completed ? "标记未完成：" : "标记完成：")) + task.title)
+            .help(task.isDropped ? "已放弃：点一下恢复成未完成" : "")
             VStack(alignment: .leading, spacing: 2) {
                 HStack(alignment: .top, spacing: 1) {
                     if let number = task.number {
@@ -47,8 +49,9 @@ struct ManagedTaskRow: View {
                               next: next, itemID: task.id, requestedEdit: $requestedEdit,
                               prepare: selectTask)
                 }
-                if task.dueDate != nil || task.repeatRule != .none || task.focusSeconds >= 1 || focus?.active?.taskID == task.id || !task.tags.isEmpty || store.pinnedTask?.id == task.id {
+                if task.dueDate != nil || task.repeatRule != .none || task.focusSeconds >= 1 || focus?.active?.taskID == task.id || !task.tags.isEmpty || store.pinnedTask?.id == task.id || task.isDropped {
                     HStack(spacing: 4) {
+                        if task.isDropped { Label("已放弃", systemImage: "nosign") }
                         if store.pinnedTask?.id == task.id {
                             Image(systemName: "pin.fill").foregroundStyle(Palette.accent).help("固定关联：新日志默认记到它名下")
                         }
@@ -88,6 +91,12 @@ struct ManagedTaskRow: View {
                     NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
                     showingDetails = true
                 }
+                if !task.completed {
+                    ItemActionButton(symbol: "nosign", title: "放弃：不用做了，但留着记录（编号、笔记都在），点已放弃的待办前面的圆圈可恢复 · ⌘Z 撤销") {
+                        NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+                        store.dropTodo(task.id, on: date)
+                    }
+                }
                 ItemActionButton(symbol: "trash", title: "删除任务 · ⌘Z 撤销", destructive: true) {
                     NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
                     store.deleteTodo(task.id, on: date)
@@ -102,6 +111,11 @@ struct ManagedTaskRow: View {
         }
         .padding(.horizontal, 6).padding(.vertical, compact ? 4 : 7)
         .background(Palette.card, in: RoundedRectangle(cornerRadius: 8))
+        // 常驻一道很淡的细边（有质感但不花），悬停时浮起来：边变清晰、下面有一点阴影。
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(Palette.line.opacity(hovered ? 0.9 : 0.35), lineWidth: 0.75).allowsHitTesting(false))
+        .shadow(color: .black.opacity(hovered && !selected ? 0.16 : 0), radius: hovered ? 4 : 0, x: 0, y: hovered ? 2 : 0)
+        .onHover { hovered = $0 }
+        .animation(Motion.quick, value: hovered)
         .overlay(alignment: .leading) {
             if emphasized { Capsule().fill(Palette.accent).frame(width: 3).padding(.vertical, 6).allowsHitTesting(false) }
         }

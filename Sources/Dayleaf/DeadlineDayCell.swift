@@ -30,12 +30,17 @@ struct DeadlineDayCell: View {
     }
     private var dueToday: [ScheduledTask] { store.calendarDeadlines[JournalDates.key(date)] ?? [] }
     private static let space = "dayCell"
-    private var accessibilityDescription: String {
+    /// 创建 DateFormatter 很贵，而 42 个格子每次重绘都要用：只建一次。
+    private static let accessibilityFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "M月d日 EEEE"
+        return formatter
+    }()
+    private var accessibilityDescription: String {
+        let formatter = Self.accessibilityFormatter
         let due = dueToday
-        let summary = due.isEmpty ? "没有截止事项" : "\(due.count) 项截止，已完成 \(due.filter(\.task.completed).count) 项"
+        let summary = due.isEmpty ? "没有截止事项" : "\(due.count) 项截止，已完成 \(due.filter(\.task.isDone).count) 项"
         return "\(formatter.string(from: date))，\(summary)\(today ? "，今天" : "")"
     }
     private var selected: Bool { JournalDates.calendar.isDate(date, inSameDayAs: selectedDate) }
@@ -73,7 +78,7 @@ struct DeadlineDayCell: View {
                 Spacer(minLength: 0)
                 if selected || hovered { logButton }
                 if !dueToday.isEmpty {
-                    Text("\(dueToday.filter(\.task.completed).count)/\(dueToday.count)")
+                    Text("\(dueToday.filter(\.task.isDone).count)/\(dueToday.filter { !$0.task.isDropped }.count)")
                         .font(.system(size: UIScale.pt(10), design: .monospaced)).foregroundStyle(Palette.muted)
                         .help("已完成 / 当天截止的事项")
                 }
@@ -81,14 +86,14 @@ struct DeadlineDayCell: View {
             ForEach(items) { item in
                 HStack(alignment: .top, spacing: 0) {
                     Button { store.toggleTodo(item.id, on: item.date) } label: {
-                        Image(systemName: item.task.completed ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(item.task.completed ? Palette.success : Palette.deadline)
+                        Image(systemName: item.task.isDropped ? "xmark.circle.fill" : (item.task.completed ? "checkmark.circle.fill" : "circle"))
+                            .foregroundStyle(item.task.isDropped ? Palette.muted : (item.task.completed ? Palette.success : Palette.deadline))
                             .frame(width: 16, alignment: .trailing)
                     }.buttonStyle(HitAreaButtonStyle(compact: true)).disabled(store.isReadOnly)
                         .background(GeometryReader { proxy in
                             Color.clear.preference(key: CheckboxFramesKey.self, value: [item.id: proxy.frame(in: .named(Self.space))])
                         })
-                        .accessibilityLabel((item.task.completed ? "标记未完成：" : "标记完成：") + item.task.title)
+                        .accessibilityLabel((item.task.isDropped ? "恢复已放弃的待办：" : (item.task.completed ? "标记未完成：" : "标记完成：")) + item.task.title)
                     TaskLinkText(source: item.task.title, completed: item.task.completed, color: Palette.ink, fontSize: 11,
                                  edit: { editTask(item) },
                                  open: SafariLinks.open,
@@ -103,7 +108,10 @@ struct DeadlineDayCell: View {
         }
         .padding(6).frame(maxWidth: .infinity, alignment: .topLeading).frame(minHeight: height, alignment: .topLeading)
         .background(selected || today || targeted ? Palette.soft : (inMonth ? Palette.card : Palette.background), in: RoundedRectangle(cornerRadius: 5))
-        .overlay(RoundedRectangle(cornerRadius: 5).stroke(selected || targeted ? Palette.accent : Palette.line.opacity(0.55), lineWidth: selected || targeted ? 1.5 : 0.5))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(selected || targeted ? Palette.accent : Palette.line.opacity(hovered ? 1 : 0.55), lineWidth: selected || targeted ? 1.5 : 0.5))
+        // 悬停的格子浮起一点：能点的感觉。
+        .shadow(color: .black.opacity(hovered && !selected ? 0.18 : 0), radius: hovered ? 4 : 0, x: 0, y: hovered ? 2 : 0)
+        .animation(Motion.quick, value: hovered)
         .contentShape(Rectangle())
         .coordinateSpace(name: Self.space)
         .onPreferenceChange(CheckboxFramesKey.self) { checkboxFrames = Array($0.values) }

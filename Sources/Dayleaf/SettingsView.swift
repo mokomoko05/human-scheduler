@@ -12,6 +12,8 @@ struct SettingsView: View {
     @AppStorage(Prefs.globalHotKey) private var globalHotKey = true
     @AppStorage(Prefs.terminalLayout) private var terminalLayout = TerminalLayout.threePanes.rawValue
     @AppStorage(Prefs.focusMinLogMinutes) private var focusMinLogMinutes = Prefs.defaultFocusMinLogMinutes
+    @AppStorage(Prefs.focusPanelStyle) private var focusPanelStyle = FocusPanelStyle.card.rawValue
+    @AppStorage(Prefs.focusPanelHidden) private var focusPanelHidden = false
 
     var body: some View {
         Form {
@@ -36,6 +38,10 @@ struct SettingsView: View {
                 }
             }
             Section("专注计时") {
+                FocusStylePicker(selection: $focusPanelStyle)
+                Toggle("隐藏计时（专注照常进行，只是不显示）", isOn: $focusPanelHidden)
+                Text("快捷键 \(HotKeyStore.binding(for: .focusPanel).label) 随时显示 / 隐藏。隐藏时仍会记录时间和日志；要结束专注，点任务行上的结束键，或先显示计时。浮窗可以拖到喜欢的位置，会被记住。")
+                    .font(.caption).foregroundStyle(.secondary)
                 Stepper(value: $focusMinLogMinutes, in: 0...120) {
                     Text(focusMinLogMinutes == 0 ? "所有专注都记入日志" : "专注不足 \(focusMinLogMinutes) 分钟不记日志")
                 }
@@ -88,5 +94,61 @@ final class SettingsWindowController {
         }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+/// 专注计时窗口的样式选择：每种样式画一个小样，点一下切换，立即生效。
+struct FocusStylePicker: View {
+    @Binding var selection: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("计时窗口样式").font(.system(size: 12, weight: .medium))
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 5), spacing: 8) {
+                ForEach(FocusPanelStyle.allCases) { style in
+                    let chosen = selection == style.rawValue
+                    Button { selection = style.rawValue } label: {
+                        VStack(spacing: 6) {
+                            FocusStyleSample(style: style).frame(height: 34)
+                            Text(style.title).font(.system(size: 11, weight: chosen ? .semibold : .regular))
+                        }
+                        .padding(.vertical, 8).frame(maxWidth: .infinity)
+                        .background(chosen ? Palette.soft : Color.clear, in: RoundedRectangle(cornerRadius: 8))
+                        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(chosen ? Palette.accent : Palette.line, lineWidth: chosen ? 1.5 : 1))
+                        .contentShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("样式 \(style.title)：\(style.detail)")
+                    .accessibilityAddTraits(chosen ? [.isButton, .isSelected] : .isButton)
+                }
+            }
+            Text((FocusPanelStyle(rawValue: selection) ?? .card).detail).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct FocusStyleSample: View {
+    let style: FocusPanelStyle
+
+    var body: some View {
+        let time = Text("12:34").font(.system(size: 10, weight: .medium, design: .monospaced))
+        ZStack {
+            switch style {
+            case .card:
+                HStack(spacing: 3) { time; Text("任务").font(.system(size: 8)); Image(systemName: "stop.circle.fill").font(.system(size: 9)).foregroundStyle(.red) }
+                    .padding(.horizontal, 6).frame(height: 24).background(Palette.card, in: RoundedRectangle(cornerRadius: 6))
+            case .pill:
+                HStack(spacing: 3) { time; Image(systemName: "stop.circle.fill").font(.system(size: 9)).foregroundStyle(.red) }
+                    .padding(.horizontal, 7).frame(height: 20).background(Palette.card, in: Capsule())
+            case .digits:
+                time.opacity(0.45)
+            case .dot:
+                Circle().fill(Palette.success).frame(width: 7, height: 7).opacity(0.75)
+            case .menuBar:
+                HStack(spacing: 2) { Image(systemName: "timer").font(.system(size: 8)); time }
+                    .padding(.horizontal, 5).frame(height: 14).background(Palette.line.opacity(0.7), in: RoundedRectangle(cornerRadius: 3))
+            }
+        }
+        .foregroundStyle(Palette.ink).frame(maxWidth: .infinity)
     }
 }
