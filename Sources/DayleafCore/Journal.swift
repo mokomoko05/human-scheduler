@@ -448,6 +448,23 @@ public final class JournalStore: ObservableObject {
         return changed
     }
 
+    /// 批量删除日志，作为一次操作撤销（⌘Z 整批恢复）。返回删除的条数；专注计时的开始 / 结束记录也算日志，一并删除。
+    @discardableResult
+    public func deleteLogs(_ ids: Set<UUID>) -> Int {
+        guard !isReadOnly, !ids.isEmpty else { return 0 }
+        var updated = days
+        var removed = 0
+        for key in Array(updated.keys) {
+            let before = updated[key]!.logs.count
+            updated[key]!.logs.removeAll { ids.contains($0.id) }
+            removed += before - updated[key]!.logs.count
+            if !updated[key]!.hasContent { updated[key] = nil }
+        }
+        guard removed > 0 else { return 0 }
+        replaceDays(updated, action: "删除日志")
+        return removed
+    }
+
     /// 批量给日志加、去标签，作为一次操作撤销。返回改动的条数。
     @discardableResult
     public func updateLogTags(add: [String] = [], remove: [String] = [], forLogs ids: Set<UUID>) -> Int {

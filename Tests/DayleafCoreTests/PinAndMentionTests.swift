@@ -183,3 +183,26 @@ final class PinAndMentionTests: XCTestCase {
         XCTAssertTrue(store.entry(for: day).hasContent, "只选了标签也算有草稿，不会被当成空的一天清掉")
     }
 }
+
+@MainActor
+final class BatchDeleteLogsTests: XCTestCase {
+    func testDeletesAcrossDaysInOneUndoStepAndEmptyDaysDisappear() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = JournalStore(directory: directory)
+        let day1 = JournalDates.calendar.date(from: DateComponents(year: 2026, month: 10, day: 7))!
+        let day2 = day1.addingTimeInterval(86400)
+        _ = try store.quickLog("甲", on: day1, now: day1.addingTimeInterval(1))
+        _ = try store.quickLog("乙", on: day1, now: day1.addingTimeInterval(2))
+        _ = try store.quickLog("丙", on: day2, now: day2.addingTimeInterval(1))
+        let ids = Set(store.allLogs().map(\.log.id).prefix(3))
+        XCTAssertEqual(store.deleteLogs(ids), 3)
+        XCTAssertTrue(store.allLogs().isEmpty)
+        XCTAssertFalse(store.entry(for: day2).hasContent, "空了的一天不留壳")
+        store.undo()
+        XCTAssertEqual(store.allLogs().count, 3, "一次 ⌘Z 整批恢复")
+        XCTAssertEqual(store.deleteLogs([]), 0)
+        XCTAssertEqual(store.deleteLogs([UUID()]), 0, "不存在的不算")
+        XCTAssertEqual(store.allLogs().count, 3)
+    }
+}

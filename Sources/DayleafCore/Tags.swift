@@ -326,6 +326,41 @@ enum LinkMatcher {
     }
 }
 
+// MARK: - 清单摘要
+
+public struct TaskSummary: Equatable {
+    /// 已逾期（未完成、截止时间已过）。
+    public let overdue: Int
+    /// 今天截止、还没完成的（不含已逾期的）。
+    public let dueToday: Int
+    /// 所有没完成的（含逾期、含没有截止日期的）。
+    public let open: Int
+    /// 今天截止的待办里：做完了几个 / 一共几个。放弃的不算在内，已逾期的也不算（它们的截止日是以前）。
+    public let doneToday: Int
+    public let totalToday: Int
+    public var todayFraction: Double { totalToday == 0 ? 0 : Double(doneToday) / Double(totalToday) }
+}
+
+extension JournalStore {
+    /// 清单顶部的摘要：「3 逾期 · 5 今天 · 12 未完成」和今天的进度。
+    public func taskSummary(now: Date = Date()) -> TaskSummary {
+        let calendar = JournalDates.calendar
+        var overdue = 0, dueToday = 0, open = 0, doneToday = 0, totalToday = 0
+        for item in tasks() {
+            let task = item.task
+            let isToday = task.dueDate.map { calendar.isDate($0, inSameDayAs: now) } == true
+            if isToday, !task.isDropped {
+                totalToday += 1
+                if task.isDone { doneToday += 1 }
+            }
+            guard !task.completed else { continue }
+            open += 1
+            if task.effectiveDeadline.map({ $0 < now }) == true { overdue += 1 } else if isToday { dueToday += 1 }
+        }
+        return TaskSummary(overdue: overdue, dueToday: dueToday, open: open, doneToday: doneToday, totalToday: totalToday)
+    }
+}
+
 // MARK: - 标签候选（输入框里的 # 补全）
 
 public struct TagCandidate: Identifiable, Equatable {

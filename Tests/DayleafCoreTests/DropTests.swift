@@ -108,3 +108,39 @@ final class DropTests: XCTestCase {
         XCTAssertFalse(text.contains("放弃的"), "复盘的「完成」里不出现放弃的")
     }
 }
+
+@MainActor
+final class TaskSummaryTests: XCTestCase {
+    func testSummaryCountsOverdueTodayOpenAndTodayProgressOnly() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = JournalStore(directory: directory)
+        let calendar = JournalDates.calendar
+        let now = calendar.date(from: DateComponents(year: 2026, month: 10, day: 9, hour: 14))!
+        func add(_ title: String, due: Int?) -> UUID {
+            let id = store.addParsedTodo(title, on: now)!.id
+            if let due { store.setDeadline(id, to: calendar.date(byAdding: .day, value: due, to: calendar.startOfDay(for: now))!) }
+            return id
+        }
+        _ = add("昨天没做", due: -1)
+        _ = add("前天没做", due: -2)
+        let doneToday = add("今天做完了", due: 0)
+        _ = add("今天还没做", due: 0)
+        let droppedToday = add("今天放弃的", due: 0)
+        _ = add("明天", due: 1)
+        _ = add("没有日期", due: nil)
+        let doneEarlier = add("以前做完的", due: -3)
+        store.toggleTodo(doneToday, on: store.locate(doneToday)!.date, now: now)
+        store.toggleTodo(doneEarlier, on: store.locate(doneEarlier)!.date, now: now)
+        store.dropTodo(droppedToday, on: store.locate(droppedToday)!.date, now: now)
+
+        let summary = store.taskSummary(now: now)
+        XCTAssertEqual(summary.overdue, 2)
+        XCTAssertEqual(summary.dueToday, 1, "今天截止且没做的（放弃的、做完的不算）")
+        XCTAssertEqual(summary.open, 5, "2 逾期 + 今天 1 + 明天 + 没日期")
+        XCTAssertEqual(summary.totalToday, 2, "今天的进度只统计今天截止的，放弃的不算")
+        XCTAssertEqual(summary.doneToday, 1)
+        XCTAssertEqual(summary.todayFraction, 0.5, accuracy: 0.001)
+        XCTAssertEqual(TaskSummary(overdue: 0, dueToday: 0, open: 0, doneToday: 0, totalToday: 0).todayFraction, 0)
+    }
+}

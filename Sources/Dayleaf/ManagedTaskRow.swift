@@ -47,7 +47,7 @@ struct ManagedTaskRow: View {
                     set: { store.renameTodo(task.id, title: $0, on: date) }
                 ), completed: task.completed, color: Palette.ink, fontSize: compact ? 12 : 14,
                               next: next, itemID: task.id, requestedEdit: $requestedEdit,
-                              prepare: selectTask)
+                              prepare: selectTask, menuItems: menuItems)
                 }
                 if task.dueDate != nil || task.repeatRule != .none || task.focusSeconds >= 1 || focus?.active?.taskID == task.id || !task.tags.isEmpty || store.pinnedTask?.id == task.id || task.isDropped {
                     HStack(spacing: 4) {
@@ -74,34 +74,8 @@ struct ManagedTaskRow: View {
                 if let focus, !task.completed, let url = FocusSession.link(in: task.title) {
                     FocusPlayButton(session: focus, task: ScheduledTask(date: date, task: task), url: url)
                 }
-                if !task.completed {
-                    let pinned = store.pinnedTask?.id == task.id
-                    ItemActionButton(symbol: pinned ? "pin.fill" : "pin", title: pinned ? "取消固定" : "固定为当前待办：新日志默认记到它名下（不计时）", active: pinned) {
-                        store.pinTask(pinned ? nil : task.id)
-                    }
-                }
-                ItemActionButton(symbol: task.tags.isEmpty ? "tag" : "tag.fill", title: "标签") {
-                    selectTask()
-                    NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
-                    showingTags = true
-                }
-                .popover(isPresented: $showingTags, arrowEdge: .leading) { TagPickerView(store: store, task: task) }
-                ItemActionButton(symbol: "calendar.badge.clock", title: "截止日期与月历短标题") {
-                    selectTask()
-                    NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
-                    showingDetails = true
-                }
-                if !task.completed {
-                    ItemActionButton(symbol: "nosign", title: "放弃：不用做了，但留着记录（编号、笔记都在），点已放弃的待办前面的圆圈可恢复 · ⌘Z 撤销") {
-                        NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
-                        store.dropTodo(task.id, on: date)
-                    }
-                }
-                ItemActionButton(symbol: "trash", title: "删除任务 · ⌘Z 撤销", destructive: true) {
-                    NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
-                    store.deleteTodo(task.id, on: date)
-                    if interaction.selectedTaskID == task.id { interaction.selectedTaskID = nil }
-                }
+                RadialMenuButton(items: { radialItems }, help: "更多操作：截止日期、标签、固定、放弃、删除")
+                    .popover(isPresented: $showingTags, arrowEdge: .leading) { TagPickerView(store: store, task: task) }
                 TaskDragHandle(task: task, enabled: !store.isReadOnly, select: { reorder?.suppressScroll = true; selectTask() }, reorder: reorder.map { model in
                     TaskReorderHooks(begin: { model.begin(task.id) }, update: { model.update($0) },
                                      end: { model.finish() }, cancel: { model.cancel() })
@@ -128,8 +102,60 @@ struct ManagedTaskRow: View {
         .simultaneousGesture(TapGesture().onEnded { selectTask() })
         .animation(.easeInOut(duration: 0.12), value: selected)
         .modifier(TaskDragSource(task: task, enabled: !store.isReadOnly, select: selectTask))
+        .contextMenu {
+            ForEach(Array(menuItems.enumerated()), id: \.offset) { _, item in
+                if item.separator { Divider() } else {
+                    Button(role: item.destructive ? .destructive : nil, action: item.action) {
+                        if let symbol = item.symbol { Label(item.title, systemImage: symbol) } else { Text(item.title) }
+                    }
+                }
+            }
+        }
         .popover(isPresented: $showingDetails, arrowEdge: .leading) { TaskDetailsView(store: store, task: task, date: date) }
         .disabled(store.isReadOnly)
+    }
+
+    /// 环形菜单里的操作（也是右键菜单的内容）。
+    private var radialItems: [RadialItem] {
+        var items: [RadialItem] = [
+            RadialItem(id: "date", symbol: "calendar.badge.clock", title: "截止日期与月历短标题", action: {
+                selectTask()
+                NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+                showingDetails = true
+            }),
+            RadialItem(id: "tag", symbol: task.tags.isEmpty ? "tag" : "tag.fill", title: "标签", active: !task.tags.isEmpty, action: {
+                selectTask()
+                NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+                showingTags = true
+            }),
+        ]
+        if !task.completed {
+            let pinned = store.pinnedTask?.id == task.id
+            items.append(RadialItem(id: "pin", symbol: pinned ? "pin.fill" : "pin", title: pinned ? "取消固定" : "固定为当前待办", active: pinned, action: {
+                store.pinTask(pinned ? nil : task.id)
+            }))
+        }
+        if !task.isDone {
+            items.append(RadialItem(id: "drop", symbol: task.isDropped ? "arrow.uturn.backward.circle" : "nosign",
+                                    title: task.isDropped ? "恢复" : "放弃（留着记录）", action: {
+                NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+                store.dropTodo(task.id, on: date)
+            }))
+        }
+        items.append(RadialItem(id: "delete", symbol: "trash", title: "删除 · ⌘Z 撤销", destructive: true, action: {
+            NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+            store.deleteTodo(task.id, on: date)
+            if interaction.selectedTaskID == task.id { interaction.selectedTaskID = nil }
+        }))
+        return items
+    }
+
+    private var menuItems: [TextMenuItem] {
+        guard !store.isReadOnly else { return [] }
+        var list = radialItems.map { TextMenuItem(title: $0.title, symbol: $0.symbol, destructive: $0.destructive, action: $0.action) }
+        // 删除前面加一条分隔线。
+        if let last = list.indices.last, list.count > 1 { list.insert(.divider, at: last) }
+        return list
     }
 
     private var overdue: Bool { !task.completed && task.effectiveDeadline.map { $0 < Date() } == true }

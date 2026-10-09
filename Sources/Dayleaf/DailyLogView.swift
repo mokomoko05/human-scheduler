@@ -279,6 +279,15 @@ struct DailyLogView: View {
         toast.show(copied == 0 ? "没有可复制的文字（只有图片）" : (copied == 1 ? "已复制 1 条日志" : "已复制 \(copied) 条日志"))
     }
 
+    /// 批量删除：一次操作，⌘Z 整批恢复；删完清掉选择。
+    private func deleteSelected(_ ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+        let count = store.deleteLogs(ids)
+        selectedLogs = []
+        if count > 0 { toast.show("已删除 \(count) 条日志", actionTitle: "撤销") { store.undo() } }
+    }
+
     private func selectionState(_ id: UUID) -> LogSelection {
         LogSelection(selected: selectedLogs.contains(id), toggle: {
             if selectedLogs.contains(id) { selectedLogs.remove(id) } else { selectedLogs.insert(id) }
@@ -306,6 +315,10 @@ struct DailyLogView: View {
                 Label("关联待办", systemImage: "link").font(.system(size: UIScale.pt(12))).padding(.horizontal, 5).frame(height: 26).contentShape(Rectangle())
             }
             .fixedSize().disabled(ids.isEmpty || store.isReadOnly)
+            Button(role: .destructive) { deleteSelected(ids) } label: { Label("删除", systemImage: "trash") }
+                .buttonStyle(HitAreaButtonStyle(compact: true)).font(.system(size: UIScale.pt(12)))
+                .foregroundStyle(TerminalPalette.amber)
+                .disabled(ids.isEmpty || store.isReadOnly).help("删除所选日志 · ⌘Z 整批撤销")
             Button("取消选择") { selectedLogs = [] }
                 .buttonStyle(HitAreaButtonStyle(compact: true)).font(.system(size: UIScale.pt(12), weight: .semibold))
                 .foregroundStyle(TerminalPalette.blue)

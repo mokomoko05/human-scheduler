@@ -16,6 +16,8 @@ struct TaskTitleView: View {
     var itemID: UUID = UUID()
     @Binding var requestedEdit: UUID?
     var prepare: () -> Void = {}
+    /// 右键菜单（在标题文字上右键也用它）。
+    var menuItems: [TextMenuItem] = []
     @State private var editing = false
     @State private var editText = ""
     @State private var focused = false
@@ -33,7 +35,7 @@ struct TaskTitleView: View {
                     .accessibilityLabel("编辑事项，支持 Markdown 链接")
             } else {
                 TaskLinkText(source: title, completed: completed, color: color, fontSize: fontSize,
-                             edit: startEditing, open: SafariLinks.open, dragTaskID: itemID, select: prepare)
+                             edit: startEditing, open: SafariLinks.open, dragTaskID: itemID, select: prepare, menuItems: menuItems)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         }

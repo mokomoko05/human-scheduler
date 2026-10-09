@@ -28,6 +28,8 @@ struct ContentView: View {
     @State private var reorder = TaskReorderModel()
     @State private var overdueCount = 0
     @State private var scrollTarget: UUID?
+    /// 点摘要里的数字时，要滚动到的分组（`overdue` / `today` 等）。
+    @State private var scrollGroup: String?
     @AppStorage(Prefs.hideCompleted) private var hideCompleted = false
     @AppStorage(Prefs.clickExpands) private var clickExpands = true
     @AppStorage(Prefs.weekStartsSunday) private var weekStartsSunday = false
@@ -352,6 +354,49 @@ struct ContentView: View {
         return result
     }
 
+    /// 清单顶部：「3 逾期 · 5 今天 · 12 未完成」（点数字跳到对应分组）和今天的进度条（只统计今天截止的）。
+    private var summaryBar: some View {
+        let summary = store.taskSummary()
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                summaryChip(summary.overdue, "逾期", tint: Palette.deadline, group: "overdue")
+                summaryChip(summary.dueToday, "今天", tint: Palette.accent, group: "today")
+                summaryChip(summary.open, "未完成", tint: Palette.muted, group: nil)
+                Spacer(minLength: 0)
+            }
+            if summary.totalToday > 0 {
+                HStack(spacing: 8) {
+                    ProgressView(value: summary.todayFraction).tint(Palette.success)
+                        .animation(Motion.quick, value: summary.doneToday)
+                        .accessibilityLabel("今天的进度").accessibilityValue("\(summary.doneToday) / \(summary.totalToday)")
+                    Text("今天 \(summary.doneToday)/\(summary.totalToday)")
+                        .font(.system(size: UIScale.pt(11), weight: .medium, design: .monospaced)).foregroundStyle(Palette.muted).fixedSize()
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func summaryChip(_ count: Int, _ title: String, tint: Color, group: String?) -> some View {
+        // 数量为 0 的不显示（「未完成」始终显示，没有任务时也是 0）。
+        if count > 0 || group == nil {
+            Button { if let group { scrollGroup = group } } label: {
+                HStack(spacing: 4) {
+                    Text("\(count)").font(.system(size: UIScale.pt(13), weight: .semibold, design: .rounded)).monospacedDigit()
+                    Text(title).font(.system(size: UIScale.pt(11)))
+                }
+                .foregroundStyle(count > 0 ? tint : Palette.muted)
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(count > 0 ? tint.opacity(0.12) : Palette.soft.opacity(0.6), in: Capsule())
+            }
+            .buttonStyle(.plain)
+            .raisedOnHover(radius: 10, enabled: group != nil && count > 0)
+            .disabled(group == nil || count == 0)
+            .help(group == nil ? "\(count) 项未完成" : "跳到「\(title)」分组")
+            .accessibilityLabel("\(count) 项\(title)")
+        }
+    }
+
     private var todoCard: some View {
         let all = store.sortedTasks()
         let visible = all.filter { !hideCompleted || !$0.task.completed }
@@ -373,14 +418,8 @@ struct ContentView: View {
                     .buttonStyle(.plain).foregroundStyle(Palette.accent).raisedOnHover(radius: 10)
                     .help("已完成的事项被隐藏，点击显示").accessibilityLabel("显示已隐藏的 \(hidden) 项已完成事项")
                 }
-                Text("\(completed) / \(all.count)")
-                    .font(.system(size: UIScale.pt(12), weight: .medium, design: .monospaced))
-                    .foregroundStyle(Palette.muted)
             }
-            ProgressView(value: Double(completed), total: Double(max(all.count, 1)))
-                .tint(Palette.success)
-                .animation(Motion.quick, value: completed)
-                .accessibilityLabel("待办完成进度")
+            summaryBar
             if visible.isEmpty {
                 emptyState(hasHidden: !all.isEmpty)
             } else {
@@ -391,6 +430,7 @@ struct ContentView: View {
                             ForEach(groups(for: visible)) { group in
                                 HStack(spacing: 6) {
                                     Text(group.title).font(.system(size: UIScale.pt(12), weight: .semibold)).foregroundStyle(group.tint)
+                                        .id("group-" + group.id)
                                     Text("\(group.items.count)").font(.system(size: UIScale.pt(11), design: .monospaced)).foregroundStyle(Palette.muted)
                                     Rectangle().fill(Palette.line).frame(height: 1)
                                 }
@@ -411,6 +451,9 @@ struct ContentView: View {
                     }
                     .onChange(of: scrollTarget) { id in
                         if let id { withAnimation(Motion.quick) { proxy.scrollTo(id, anchor: .center) }; scrollTarget = nil }
+                    }
+                    .onChange(of: scrollGroup) { id in
+                        if let id { withAnimation(Motion.quick) { proxy.scrollTo("group-" + id, anchor: .top) }; scrollGroup = nil }
                     }
                     .onChange(of: requestedEdit) { if let id = $0 { proxy.scrollTo(id, anchor: .center) } }
                     .onChange(of: interaction.selectedTaskID) { id in
