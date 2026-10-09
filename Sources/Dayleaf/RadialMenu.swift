@@ -41,11 +41,11 @@ enum RadialLayout {
     /// 鼠标（相对圆心，屏幕坐标，y 向上）还算不算在菜单上：圆心附近，或者扇形环范围内（留一点余量，免得边缘一抖就收起来）。
     static func contains(_ v: CGPoint) -> Bool {
         let distance = hypot(v.x, v.y)
-        if distance <= hubRadius + 10 { return true }
-        guard distance <= radius + itemSize / 2 + 8 else { return false }
+        if distance <= hubRadius + 6 { return true }
+        guard distance <= radius + itemSize / 2 + 4 else { return false }
         var angle = atan2(v.y, v.x) * 180 / .pi
         if angle < 0 { angle += 360 }
-        return angle >= fanStart - 14 && angle <= fanEnd + 14
+        return angle >= fanStart - 8 && angle <= fanEnd + 8
     }
 
     /// 鼠标指着第几项（没有指着任何一项为 nil）。
@@ -59,10 +59,20 @@ enum RadialLayout {
     }
 }
 
+/// 环形菜单的动画：展开利索一点（弹性很小），收回更快、不错开。
+enum RadialMotion {
+    static let expand = Animation.spring(response: 0.18, dampingFraction: 0.78)
+    static let collapse = Animation.easeIn(duration: 0.1)
+    /// 收回动画的时长，之后才真正关掉浮层。
+    static let collapseDuration: TimeInterval = 0.11
+}
+
 @MainActor
 final class RadialMenuModel: ObservableObject {
     let items: [RadialItem]
     @Published var hovered: Int?
+    /// 展开着（true）还是正在收回圆心（false）：鼠标一离开就收，收的过程中鼠标回来又会展开。
+    @Published var expanded = false
     var choose: (Int) -> Void = { _ in }
 
     init(items: [RadialItem]) { self.items = items }
@@ -71,7 +81,7 @@ final class RadialMenuModel: ObservableObject {
 /// 展开的环形菜单：一段带质感的扇形环，上面是各个操作；指着哪个，上方显示它的名字。
 struct RadialMenuView: View {
     @ObservedObject var model: RadialMenuModel
-    @State private var appeared = false
+    private var appeared: Bool { model.expanded }
 
     private var hub: CGPoint { RadialLayout.hub }
 
@@ -94,10 +104,8 @@ struct RadialMenuView: View {
             }
         }
         .frame(width: RadialLayout.panelSize.width, height: RadialLayout.panelSize.height, alignment: .topLeading)
-        .animation(Motion.quick, value: model.hovered)
-        .onAppear {
-            if Motion.reduced { appeared = true } else { withAnimation(.spring(response: 0.32, dampingFraction: 0.72)) { appeared = true } }
-        }
+        .animation(Motion.reduced ? nil : .easeOut(duration: 0.08), value: model.hovered)
+        .onAppear { model.expanded = true }
         .accessibilityElement(children: .contain).accessibilityLabel("操作菜单")
     }
 
@@ -115,6 +123,7 @@ struct RadialMenuView: View {
             .shadow(color: .black.opacity(0.32), radius: 9, y: 4)
             .scaleEffect(appeared ? 1 : 0.4, anchor: UnitPoint(x: hub.x / RadialLayout.panelSize.width, y: hub.y / RadialLayout.panelSize.height))
             .opacity(appeared ? 1 : 0)
+            .animation(Motion.reduced ? nil : (appeared ? RadialMotion.expand : RadialMotion.collapse), value: appeared)
     }
 
     private var hubView: some View {
@@ -144,7 +153,7 @@ struct RadialMenuView: View {
         .position(x: hub.x + (appeared ? offset.width : 0), y: hub.y + (appeared ? offset.height : 0))
         .scaleEffect(appeared ? 1 : 0.3, anchor: .center)
         .opacity(appeared ? 1 : 0)
-        .animation(Motion.reduced ? nil : .spring(response: 0.34, dampingFraction: 0.7).delay(Double(index) * 0.025), value: appeared)
+        .animation(Motion.reduced ? nil : (appeared ? RadialMotion.expand.delay(Double(index) * 0.012) : RadialMotion.collapse), value: appeared)
         .accessibilityLabel(item.title)
     }
 }
@@ -162,11 +171,11 @@ final class RadialMenuController {
     private var model: RadialMenuModel?
     private var timer: Timer?
     private var hubScreen = CGPoint.zero
-    private var outsideSince: Date?
+    private var closing: Task<Void, Never>?
+    /// 正在收回（鼠标已经离开，动画放完就关）。
+    private(set) var isCollapsing = false
     private var pendingOpen: Task<Void, Never>?
     private var observers: [NSObjectProtocol] = []
-    /// 鼠标离开菜单多久后收起。
-    static let grace: TimeInterval = 0.18
     /// 鼠标停在三点上多久后展开。
     static let openDelay: Duration = .milliseconds(110)
 
@@ -219,12 +228,15 @@ final class RadialMenuController {
         parent?.addChildWindow(panel, ordered: .above)
         panel.orderFrontRegardless()
         self.panel = panel
-        outsideSince = nil
+        isCollapsing = false
         startTracking()
     }
 
     func dismiss() {
         cancelOpen()
+        closing?.cancel()
+        closing = nil
+        isCollapsing = false
         timer?.invalidate()
         timer = nil
         observers.forEach(NotificationCenter.default.removeObserver)
@@ -246,7 +258,7 @@ final class RadialMenuController {
 
     private func startTracking() {
         guard !Headless.active else { return }
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 90, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.update(mouse: NSEvent.mouseLocation) }
         }
         observers.append(NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
@@ -254,19 +266,27 @@ final class RadialMenuController {
         })
     }
 
-    /// 根据鼠标位置更新「指着哪一项」，并在鼠标离开菜单一小会儿后收起。
-    func update(mouse: CGPoint, now: Date = Date()) {
+    /// 根据鼠标位置更新「指着哪一项」。鼠标一离开就立刻开始收回，动画放完关掉浮层；收的过程中鼠标回来就反向展开。
+    func update(mouse: CGPoint) {
         guard let model else { return }
         let relative = CGPoint(x: mouse.x - hubScreen.x, y: mouse.y - hubScreen.y)
         let inside = RadialLayout.contains(relative)
         let hovered = inside ? RadialLayout.item(at: relative, count: model.items.count) : nil
         if model.hovered != hovered { model.hovered = hovered }
         if inside {
-            outsideSince = nil
-        } else if let since = outsideSince {
-            if now.timeIntervalSince(since) >= Self.grace { dismiss() }
-        } else {
-            outsideSince = now
+            guard isCollapsing else { return }
+            isCollapsing = false
+            closing?.cancel()
+            closing = nil
+            model.expanded = true
+        } else if !isCollapsing {
+            isCollapsing = true
+            model.expanded = false
+            closing = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(RadialMotion.collapseDuration))
+                guard !Task.isCancelled else { return }
+                self?.dismiss()
+            }
         }
     }
 }

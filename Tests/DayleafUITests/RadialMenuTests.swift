@@ -71,19 +71,30 @@ final class RadialMenuTests: XCTestCase {
         XCTAssertTrue(fired.isEmpty)
     }
 
-    func testMenuClosesOnlyAfterTheMouseHasBeenAwayForTheGracePeriod() {
+    func testMenuStartsCollapsingTheMomentTheMouseLeavesAndClosesWhenTheAnimationEnds() async throws {
         let menu = RadialMenuController.shared
         menu.present(items: items(3), hubAt: CGPoint(x: 600, y: 500))
-        let start = Date()
         let away = CGPoint(x: 900, y: 500)
-        menu.update(mouse: away, now: start)
-        XCTAssertTrue(menu.isOpen, "刚离开不立刻收起")
-        menu.update(mouse: CGPoint(x: 600, y: 500), now: start.addingTimeInterval(0.1))
-        menu.update(mouse: away, now: start.addingTimeInterval(0.15))
-        menu.update(mouse: away, now: start.addingTimeInterval(0.25))
-        XCTAssertTrue(menu.isOpen, "中途回来过，计时重新开始")
-        menu.update(mouse: away, now: start.addingTimeInterval(0.15 + RadialMenuController.grace + 0.01))
-        XCTAssertFalse(menu.isOpen, "离开超过宽限时间才收起")
+        menu.update(mouse: away)
+        XCTAssertTrue(menu.isCollapsing, "一离开就开始收回，不等")
+        XCTAssertTrue(menu.isOpen, "收回动画还在放，浮层还在")
+        try await Task.sleep(nanoseconds: UInt64((RadialMotion.collapseDuration + 0.15) * 1_000_000_000))
+        XCTAssertFalse(menu.isOpen, "动画放完就关掉")
+    }
+
+    func testMouseReturningDuringTheCollapseExpandsItAgain() async throws {
+        let menu = RadialMenuController.shared
+        menu.present(items: items(3), hubAt: CGPoint(x: 600, y: 500))
+        menu.update(mouse: CGPoint(x: 900, y: 500))
+        XCTAssertTrue(menu.isCollapsing)
+        menu.update(mouse: CGPoint(x: 600, y: 500))
+        XCTAssertFalse(menu.isCollapsing, "鼠标回来，反向展开")
+        try await Task.sleep(nanoseconds: UInt64((RadialMotion.collapseDuration + 0.15) * 1_000_000_000))
+        XCTAssertTrue(menu.isOpen, "回来之后不会被之前排好的关闭带走")
+    }
+
+    func testAnimationsAreQuickAndCollapseIsFasterThanExpand() {
+        XCTAssertLessThanOrEqual(RadialMotion.collapseDuration, 0.12)
     }
 
     func testPresentingAgainReplacesTheOldMenuAndEmptyItemsOpenNothing() {
