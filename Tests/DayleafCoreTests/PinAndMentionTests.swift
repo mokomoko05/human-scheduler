@@ -185,6 +185,43 @@ final class PinAndMentionTests: XCTestCase {
 }
 
 @MainActor
+final class ClosedTasksInMentionTests: XCTestCase {
+    private let day = JournalDates.calendar.date(from: DateComponents(year: 2026, month: 10, day: 7))!
+
+    func testClosedAndDroppedTasksAreFoundButRankAfterOpenOnes() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = JournalStore(directory: directory)
+        for title in ["论文 初稿", "论文 终稿", "论文 参考文献", "写周报"] { _ = store.addParsedTodo(title, on: day) }
+        func id(_ n: Int) -> UUID { store.locate(number: n)!.id }
+        store.toggleTodo(id(1), on: store.locate(number: 1)!.date)          // 做完了
+        store.dropTodo(id(2), on: store.locate(number: 2)!.date)            // 放弃了
+
+        func numbers(_ query: String, closed: Bool = true) -> [Int] {
+            store.linkCandidates(query: query, includeCompleted: closed).compactMap(\.task.number)
+        }
+        XCTAssertEqual(numbers("论文", closed: false), [3], "不带 includeCompleted 时仍只有未完成的（选择器默认行为不变）")
+        XCTAssertEqual(numbers("论文"), [3, 1, 2], "已完成、已放弃的也能搜到，排在未完成的后面")
+        XCTAssertEqual(numbers("lw"), [3, 1, 2], "拼音首字母同样")
+        XCTAssertEqual(numbers("#1").first, 1, "编号精确命中排第一，哪怕它已经完成")
+        XCTAssertEqual(numbers("#2").first, 2, "已放弃的也一样")
+        XCTAssertEqual(numbers("").prefix(2), [3, 4], "不输入查询词时，未完成的在最前")
+    }
+
+    func testLoggingAgainstAClosedTaskStillWorks() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        let store = JournalStore(directory: directory)
+        let done = try XCTUnwrap(store.addParsedTodo("交报销单", on: day)).task.id
+        let dropped = try XCTUnwrap(store.addParsedTodo("交报销材料", on: day)).task.id
+        store.toggleTodo(done, on: store.locate(done)!.date)
+        store.dropTodo(dropped, on: store.locate(dropped)!.date)
+        _ = try store.quickLog("补记", taskID: done, on: day)   // 选中已完成的任务也能记日志
+        XCTAssertEqual(store.allLogs().last?.log.taskID, done)
+    }
+}
+
+@MainActor
 final class BatchDeleteLogsTests: XCTestCase {
     func testDeletesAcrossDaysInOneUndoStepAndEmptyDaysDisappear() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

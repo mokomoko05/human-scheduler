@@ -264,4 +264,18 @@ final class MentionTests: XCTestCase {
         model.link = store.locate(number: 1)?.id
         XCTAssertEqual(height(), bare, accuracy: 0.5, "选了标签和待办，窗口高度不变，不用再「展开」")
     }
+
+    func testAtCompletionFindsCompletedAndDroppedTasksAfterOpenOnes() {
+        let store = makeStore()   // 读论文 / 写周报 / 整理发票
+        _ = store.addParsedTodo("论文终稿", on: day)
+        _ = store.addParsedTodo("论文参考文献", on: day)
+        store.toggleTodo(store.locate(number: 1)!.id, on: store.locate(number: 1)!.date)
+        store.dropTodo(store.locate(number: 5)!.id, on: store.locate(number: 5)!.date)
+        let state = MentionState()
+        state.provider = MentionProviders.make(store: store)
+        state.update(MentionToken(range: NSRange(location: 0, length: 3), query: "论文"))
+        XCTAssertEqual(numbers(state), [4, 5, 1], "未完成的在前；已完成（#1）、已放弃（#5）也搜得到，关闭的这一组内部仍按匹配度排（#5 以「论文」开头，比 #1 包含更靠前）")
+        state.update(MentionToken(range: NSRange(location: 0, length: 3), query: "lw"))
+        XCTAssertEqual(Set(numbers(state)), [1, 4, 5], "拼音首字母同样能搜到")
+    }
 }

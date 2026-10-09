@@ -253,17 +253,19 @@ extension JournalStore {
             if !contextTags.isEmpty, item.task.tags.contains(where: { tag in contextTags.contains { TagText.matches(tag, query: $0) } }) { return 2 }
             return recent.contains(item.id) ? 3 : 4
         }
-        func rank(_ item: ScheduledTask) -> (Int, Int, Int) {
+        // 已完成 / 已放弃的排在所有未完成的后面（编号精确命中除外：你明确点了号，就该排第一）。
+        func rank(_ item: ScheduledTask) -> (Int, Int, Int, Int) {
             let value = quality[item.id] ?? 9
-            if value == 0 { return (0, 0, 0) }
-            return (value >= LinkMatcher.fuzzy ? 2 : 1, bucket(item), value)
+            if value == 0 { return (0, 0, 0, 0) }
+            return (item.task.completed ? 1 : 0, value >= LinkMatcher.fuzzy ? 2 : 1, bucket(item), value)
         }
         return matched.sorted {
             let (a, b) = (rank($0), rank($1))
             if a.0 != b.0 { return a.0 < b.0 }
             if a.1 != b.1 { return a.1 < b.1 }
-            if a.1 == 3, latest[$0.id] != latest[$1.id] { return (latest[$0.id] ?? .distantPast) > (latest[$1.id] ?? .distantPast) }
             if a.2 != b.2 { return a.2 < b.2 }
+            if a.2 == 3, latest[$0.id] != latest[$1.id] { return (latest[$0.id] ?? .distantPast) > (latest[$1.id] ?? .distantPast) }
+            if a.3 != b.3 { return a.3 < b.3 }
             return (order[$0.id] ?? 0) < (order[$1.id] ?? 0)
         }
     }

@@ -139,7 +139,8 @@ enum MentionProviders {
     static func make(store: JournalStore, contextTags: @escaping () -> [String] = { [] }, chosenTags: @escaping () -> [String] = { [] }) -> (MentionTrigger, String) -> [MentionItem] {
         { [store] trigger, query in
             switch trigger {
-            case .task: return store.linkCandidates(query: query, contextTags: contextTags()).map(MentionItem.task)
+            // 已完成、已放弃的也能搜到（排在未完成的后面）。
+            case .task: return store.linkCandidates(query: query, includeCompleted: true, contextTags: contextTags()).map(MentionItem.task)
             case .tag: return store.tagCandidates(query: query, excluding: chosenTags()).map(MentionItem.tag)
             }
         }
@@ -191,6 +192,13 @@ struct MentionList: View {
                 .foregroundStyle(Palette.muted).frame(width: 34, alignment: .leading)
             Text(String(TaskText.rendered(item.task.title, alias: item.task.calendarName).characters))
                 .font(.system(size: UIScale.pt(13))).lineLimit(1)
+                .foregroundStyle(item.task.completed ? Palette.muted : Palette.ink)
+                .strikethrough(item.task.isDone, color: Palette.muted)
+            if item.task.isDropped {
+                Label("已放弃", systemImage: "xmark.circle.fill").labelStyle(.titleAndIcon).font(.system(size: UIScale.pt(10))).foregroundStyle(Palette.muted)
+            } else if item.task.isDone {
+                Label("已完成", systemImage: "checkmark.circle.fill").labelStyle(.titleAndIcon).font(.system(size: UIScale.pt(10))).foregroundStyle(Palette.success)
+            }
             if isFocus { Image(systemName: "timer").foregroundStyle(Palette.success).font(.system(size: UIScale.pt(10))) }
             if isPinned { Image(systemName: "pin.fill").foregroundStyle(Palette.accent).font(.system(size: UIScale.pt(10))) }
             Spacer(minLength: 4)
