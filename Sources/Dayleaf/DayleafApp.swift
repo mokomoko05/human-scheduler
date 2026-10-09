@@ -61,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private let toast = ToastCenter()
     private let focus = FocusSession()
     private var focusPanel: FocusPanelController?
+    private var autoHide: AutoHideOnResign?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSWindow.allowsAutomaticWindowTabbing = false
@@ -74,6 +75,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         focusPanel = FocusPanelController(session: focus)
         loginItem = LoginItem()
         settings = SettingsWindowController(loginItem: loginItem, failedHotKeys: { [weak self] in self?.failedHotKeys })
+        // 切到别的应用就把工作窗口收起来；快速面板和专注计时窗口不在其中。
+        autoHide = AutoHideOnResign(windows: { [weak self] in
+            [self?.window, NotesWindowController.shared.window, DayLogWindowController.shared.window, self?.settings.window]
+        }, extraHide: { [weak self] in self?.shell.hideForAppDeactivation() })
         shell.handoffWindow = { [unowned self] in otherWindowForHandoff(excluding: nil) }
         NotesWindowController.shared.handoffWindow = { [unowned self] in otherWindowForHandoff(excluding: NotesWindowController.shared.window) }
         _ = ThemeStore.shared   // 读取已保存的配色和外观并应用

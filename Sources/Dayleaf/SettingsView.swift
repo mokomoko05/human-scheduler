@@ -14,6 +14,7 @@ struct SettingsView: View {
     @AppStorage(Prefs.focusMinLogMinutes) private var focusMinLogMinutes = Prefs.defaultFocusMinLogMinutes
     @AppStorage(Prefs.focusPanelStyle) private var focusPanelStyle = FocusPanelStyle.card.rawValue
     @AppStorage(Prefs.focusPanelHidden) private var focusPanelHidden = false
+    @AppStorage(AutoHideOnResign.prefKey) private var autoHideOnResign = true
 
     var body: some View {
         Form {
@@ -50,6 +51,9 @@ struct SettingsView: View {
             }
             Section("通用") {
                 Toggle("登录时自动启动", isOn: Binding(get: { loginItem.enabled }, set: loginItem.setEnabled))
+                Toggle("切到别的应用时自动收起窗口", isOn: $autoHideOnResign)
+                Text("主窗口、笔记、日志、终端、设置在 Scheduler 失去前台时立刻收起（里面的内容、草稿、终端里的程序都保留）；快速日志和专注计时窗口不受影响，失焦也留在屏幕上。用全局快捷键或点 Dock 图标再唤起。在 Scheduler 自己的窗口之间切换不算离开。")
+                    .font(.caption).foregroundStyle(.secondary)
                 Picker("新建终端的布局", selection: $terminalLayout) {
                     Text("三窗格：左边上下两格，右边一栏").tag(TerminalLayout.threePanes.rawValue)
                     Text("单窗格").tag(TerminalLayout.single.rawValue)
@@ -73,7 +77,7 @@ struct SettingsView: View {
 
 @MainActor
 final class SettingsWindowController {
-    private var window: NSWindow?
+    private(set) var window: NSWindow?
     private let loginItem: LoginItem
     private let failedHotKeys: () -> Set<HotKeyAction>?
 

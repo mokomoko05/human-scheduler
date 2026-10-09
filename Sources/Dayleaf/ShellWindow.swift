@@ -395,6 +395,14 @@ final class ShellWindowController: NSObject, NSWindowDelegate, LocalProcessTermi
         }
     }
 
+    /// 应用失去前台时的收起：只藏窗口，不交还焦点（用户已经在别的应用里了）。shell 照常运行。
+    func hideForAppDeactivation() {
+        for window in windows where window.isVisible {
+            WindowFade.reset(window)
+            window.orderOut(nil)
+        }
+    }
+
     // MARK: - 窗口与标签页
 
     /// 新开一个独立窗口（`⌘N`），起始目录继承当前终端。
