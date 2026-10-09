@@ -107,3 +107,37 @@ final class TaskLinkTextTests: XCTestCase {
         XCTAssertEqual(opened.count, 1)
     }
 }
+
+@MainActor
+final class TextContextMenuTests: XCTestCase {
+    private func event() -> NSEvent {
+        NSEvent.mouseEvent(with: .rightMouseDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: 0, context: nil, eventNumber: 0, clickCount: 1, pressure: 1)!
+    }
+
+    func testMenuIsBuiltFromItemsWithSeparatorsAndFiresActions() throws {
+        var fired: [String] = []
+        let menu = NSMenu.make([
+            TextMenuItem(title: "复制", symbol: "doc.on.doc", action: { fired.append("copy") }),
+            .divider,
+            TextMenuItem(title: "删除", symbol: "trash", destructive: true, action: { fired.append("delete") }),
+        ])
+        XCTAssertEqual(menu.items.map(\.title), ["复制", "", "删除"])
+        XCTAssertTrue(menu.items[1].isSeparatorItem)
+        XCTAssertNotNil(menu.items[0].image)
+        for item in [menu.items[0], menu.items[2]] {
+            let target = try XCTUnwrap(item.target)
+            _ = target.perform(item.action)
+        }
+        XCTAssertEqual(fired, ["copy", "delete"])
+    }
+
+    func testTextViewUsesCustomMenuOnlyWhenItemsAreGivenAndAddsCopyForASelection() {
+        let view = InteractiveTaskText()
+        view.string = "一段日志文字"
+        XCTAssertNil(view.menu(for: event()), "没有自定义操作时保持原来的行为：没有右键菜单")
+        view.menuItems = [TextMenuItem(title: "编辑", action: {}), TextMenuItem(title: "删除", destructive: true, action: {})]
+        XCTAssertEqual(view.menu(for: event())?.items.map(\.title), ["编辑", "删除"])
+        view.setSelectedRange(NSRange(location: 0, length: 2))
+        XCTAssertEqual(view.menu(for: event())?.items.map(\.title), ["拷贝所选文字", "", "编辑", "删除"], "选中了文字就多一项拷贝")
+    }
+}

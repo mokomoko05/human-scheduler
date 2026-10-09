@@ -282,7 +282,7 @@ struct DailyLogView: View {
     private func selectionState(_ id: UUID) -> LogSelection {
         LogSelection(selected: selectedLogs.contains(id), toggle: {
             if selectedLogs.contains(id) { selectedLogs.remove(id) } else { selectedLogs.insert(id) }
-        })
+        }, anySelected: !validSelection.isEmpty)
     }
 
     private var batchBar: some View {
@@ -574,6 +574,8 @@ struct DailyLogView: View {
 struct LogSelection {
     let selected: Bool
     let toggle: () -> Void
+    /// 列表里已经有选中的日志：这时每一行的选择圈常驻显示，方便继续点选。
+    var anySelected = false
 }
 
 private struct DailyLogRow: View {
@@ -662,7 +664,7 @@ private struct DailyLogRow: View {
                     TaskLinkText(source: log.text, completed: false, color: TerminalPalette.text, fontSize: 12,
                                  edit: startEditing, open: SafariLinks.open,
                                  maxLines: 0, monospaced: true, compactLines: true,
-                                 click: log.images.isEmpty ? nil : toggleImages)
+                                 click: log.images.isEmpty ? nil : toggleImages, menuItems: menuItems)
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
             if !log.images.isEmpty {
@@ -676,37 +678,80 @@ private struct DailyLogRow: View {
                 .accessibilityLabel(expanded ? "收起图片" : "查看 \(log.images.count) 张图片")
             }
             if !log.tags.isEmpty { TaskTagLine(tags: log.tags).padding(.top, 2) }
-            HStack(spacing: 0) {
-                ItemActionButton(symbol: "doc.on.doc", title: log.copyText == nil ? "这条只有图片，没有文字可复制" : "复制这条日志的文字（不含图片）", compact: true) { copy(log) }
-                    .disabled(log.copyText == nil)
-                ItemActionButton(symbol: "pencil", title: "在右侧编辑这条记录", compact: true) { edit(log, date) }
-                ItemActionButton(symbol: "trash", title: "删除记录 · 可撤销", destructive: true, compact: true, action: delete)
-                    .allowsHitTesting(hovered || editing)
-            }
-            .fixedSize()
-            .opacity(hovered || editing ? 1 : 0.18)
-            .disabled(store.isReadOnly)
-            Button(action: selection.toggle) {
-                Image(systemName: selection.selected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: UIScale.pt(13)))
-                    .frame(width: 22, height: 22).contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(selection.selected ? TerminalPalette.blue : TerminalPalette.muted)
-            .help(selection.selected ? "取消选中" : "选中这条日志，可批量加标签、关联待办")
-            .accessibilityLabel(selection.selected ? "取消选中这条日志" : "选中这条日志")
         }
         .frame(minHeight: 22, alignment: .top)
         .background(highlighted || selection.selected ? TerminalPalette.blue.opacity(0.14) : Color.clear, in: RoundedRectangle(cornerRadius: 3))
         .contentShape(Rectangle())
+        // 操作按钮浮在行的右上角，不占布局：平时这一行是干净的，文字可以用满整行。
+        .overlay(alignment: .topTrailing) { floatingActions }
         .onContinuousHover { phase in
             switch phase {
             case .active: hovered = true
             case .ended: hovered = false
             }
         }
+        .contextMenu {
+            ForEach(Array(menuItems.enumerated()), id: \.offset) { _, item in
+                if item.separator { Divider() } else {
+                    Button(role: item.destructive ? .destructive : nil, action: item.action) {
+                        if let symbol = item.symbol { Label(item.title, systemImage: symbol) } else { Text(item.title) }
+                    }
+                }
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: .dayleafCommitEditing)) { _ in finishEditing() }
         .onDisappear { finishEditing() }
+    }
+
+    /// 右键菜单（和浮出的按钮是同一批操作，另外有删除）。
+    private var menuItems: [TextMenuItem] {
+        guard !store.isReadOnly else {
+            return [TextMenuItem(title: "复制文字", symbol: "doc.on.doc", action: { copy(log) })]
+        }
+        return [
+            TextMenuItem(title: "复制文字（不含图片）", symbol: "doc.on.doc", action: { copy(log) }),
+            TextMenuItem(title: "编辑", symbol: "pencil", action: { edit(log, date) }),
+            TextMenuItem(title: selection.selected ? "取消选中" : "选中（可批量加标签、关联待办）", symbol: selection.selected ? "checkmark.circle" : "circle", action: selection.toggle),
+            .divider,
+            TextMenuItem(title: "删除（可撤销）", symbol: "trash", destructive: true, action: delete),
+        ]
+    }
+
+    /// 悬停时才出现的小胶囊：复制、编辑，加上选择圈；已经选了几条之后，选择圈常驻，方便继续点选。
+    @ViewBuilder
+    private var floatingActions: some View {
+        let showsButtons = (hovered || editing) && !store.isReadOnly
+        let showsSelect = hovered || editing || selection.selected || selection.anySelected
+        if showsButtons || showsSelect {
+            HStack(spacing: 0) {
+                if showsButtons {
+                    ItemActionButton(symbol: "doc.on.doc", title: log.copyText == nil ? "这条只有图片，没有文字可复制" : "复制这条日志的文字（不含图片）", compact: true) { copy(log) }
+                        .disabled(log.copyText == nil)
+                    ItemActionButton(symbol: "pencil", title: "在右侧编辑这条记录 · 右键还有删除", compact: true) { edit(log, date) }
+                }
+                if showsSelect {
+                    Button(action: selection.toggle) {
+                        Image(systemName: selection.selected ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: UIScale.pt(13)))
+                            .frame(width: 22, height: 22).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(selection.selected ? TerminalPalette.blue : TerminalPalette.muted)
+                    .help(selection.selected ? "取消选中" : "选中这条日志，可批量加标签、关联待办")
+                    .accessibilityLabel(selection.selected ? "取消选中这条日志" : "选中这条日志")
+                }
+            }
+            .padding(.horizontal, 2)
+            .background {
+                if showsButtons {
+                    Capsule().fill(TerminalPalette.surface)
+                        .overlay(Capsule().strokeBorder(TerminalPalette.muted.opacity(0.28), lineWidth: 0.75))
+                        .shadow(color: .black.opacity(0.28), radius: 3, y: 1.5)
+                }
+            }
+            .padding(.trailing, 4)
+            .transition(.opacity)
+        }
     }
 
     private func startEditing() {
