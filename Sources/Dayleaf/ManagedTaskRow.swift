@@ -71,8 +71,8 @@ struct ManagedTaskRow: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             HStack(spacing: 0) {
-                if let focus, !task.completed, let url = FocusSession.link(in: task.title) {
-                    FocusPlayButton(session: focus, task: ScheduledTask(date: date, task: task), url: url)
+                if let focus, !task.completed {
+                    FocusPlayButton(session: focus, task: ScheduledTask(date: date, task: task), url: FocusSession.link(in: task.title))
                 }
                 RadialMenuButton(items: { radialItems }, help: "更多操作：截止日期、标签、固定、放弃、删除")
                     .popover(isPresented: $showingTags, arrowEdge: .leading) { TagPickerView(store: store, task: task) }

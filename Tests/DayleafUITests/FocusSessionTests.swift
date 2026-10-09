@@ -85,6 +85,54 @@ final class FocusSessionTests: XCTestCase {
         XCTAssertEqual(launched.map(\.host), ["arxiv.org"], "没开着才打开")
     }
 
+    /// 没有链接的待办：和有链接的一样能专注计时，只是不打开页面、不检测窗口。
+    func testTaskWithoutALinkCanFocusButOpensNothingAndNeverAutoStops() async throws {
+        let (session, store, _) = try makeSession()
+        store.addTodo("整理房间", on: Date())
+        let plain = try XCTUnwrap(store.locate(number: 2))
+        XCTAssertNil(FocusSession.link(in: plain.task.title))
+        var opened: [URL] = []
+        session.openLink = { opened.append($0) }
+        var probed = 0
+        session.activateExistingTab = { _ in probed += 1; return false }
+        let start = JournalDates.calendar.date(bySettingHour: 12, minute: 0, second: 0, of: Date())!
+        var changes: [Bool] = []
+        session.onActiveChange = { changes.append($0) }
+
+        session.start(task: plain, url: nil, now: start)
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertNotNil(session.active)
+        XCTAssertNil(session.active?.url)
+        XCTAssertEqual(changes, [true], "计时窗口照常出现")
+        XCTAssertTrue(opened.isEmpty, "没有链接，不打开任何页面")
+        XCTAssertEqual(probed, 0, "也不去找已经开着的标签页")
+        XCTAssertEqual(store.focusTaskID, plain.id, "专注期间的日志照常关联到它")
+
+        // 不检测：计时器每秒走一次，但没有链接就不会去探测前台，所以不会因为「离开」而自动结束。
+        // （开始时间在过去的 12:00，计时器据此算出的 elapsed 很大，说明它确实在走。）
+        try? await Task.sleep(nanoseconds: 2_300_000_000)
+        XCTAssertNotNil(session.active, "没有链接的专注只能手动结束")
+        XCTAssertGreaterThan(session.elapsed, 0.5, "秒表照常走")
+
+        session.stop(reason: "手动结束", now: start.addingTimeInterval(1503))
+        XCTAssertEqual(changes, [true, false])
+        let logs = try XCTUnwrap(store.days[JournalDates.key(start)]?.logs)
+        XCTAssertEqual(logs.map(\.text), ["▶ 开始专注", "■ 结束专注 · 用时 25 分 3 秒 · 累计 25 分 3 秒 · 手动结束"], "日志和有链接的任务完全一样")
+        XCTAssertEqual(store.locate(plain.id)?.task.focusSeconds ?? 0, 1503, accuracy: 0.01)
+    }
+
+    func testSwitchingBetweenLinkedAndPlainTasksEndsTheFirst() throws {
+        let (session, store, linked) = try makeSession()
+        store.addTodo("整理房间", on: Date())
+        let plain = try XCTUnwrap(store.locate(number: 2))
+        session.start(task: linked, url: try XCTUnwrap(FocusSession.link(in: linked.task.title)))
+        session.start(task: plain, url: nil)
+        XCTAssertEqual(session.active?.taskID, plain.id, "切到没有链接的任务，前一个正常结束")
+        XCTAssertEqual(store.locate(linked.id)?.task.focusSeconds ?? -1, 0, accuracy: 1)
+        session.stop(reason: "手动结束")
+        XCTAssertNil(session.active)
+    }
+
     func testStartLogsStartTimeAndStopLogsDurationAndReason() async throws {
         let (session, store, task) = try makeSession()
         var opened: [URL] = []

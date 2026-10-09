@@ -22,7 +22,8 @@ final class FocusSession: ObservableObject {
         let taskID: UUID
         let number: Int?
         let title: String
-        let url: URL
+        /// 任务里的链接；没有链接的任务为 nil：只计时，不打开页面、也不检测是否离开。
+        let url: URL?
         let started: Date
         /// 「开始专注」那条日志；专注太短时要把它撤掉。
         var startLogID: UUID?
@@ -77,7 +78,7 @@ final class FocusSession: ObservableObject {
 
     // MARK: - 开始与结束
 
-    func start(task: ScheduledTask, url: URL, now: Date = Date()) {
+    func start(task: ScheduledTask, url: URL?, now: Date = Date()) {
         guard let store, !store.isReadOnly else { return }
         if active != nil { stop(reason: "切换到了另一个任务", now: now) }
         let number = task.task.number
@@ -86,13 +87,15 @@ final class FocusSession: ObservableObject {
         awayStreak = 0
         learnedBundle = nil
         automationDenied = false
-        baseline = Self.baseline(for: url)
+        baseline = url.map(Self.baseline(for:))
         active?.startLogID = store.addFocusLog("▶ 开始专注", taskID: task.id, now: now)
         store.setFocusTask(task.id)
-        // 已经开着就切过去，不要再打开一次，否则会回到页面开头。
-        Task { @MainActor in
-            if await activateExistingTab(url) { return }
-            openLink(url)
+        // 已经开着就切过去，不要再打开一次，否则会回到页面开头。没有链接就没有页面可开。
+        if let url {
+            Task { @MainActor in
+                if await activateExistingTab(url) { return }
+                openLink(url)
+            }
         }
         onActiveChange?(true)
         timer?.invalidate()
@@ -149,10 +152,11 @@ final class FocusSession: ObservableObject {
     private func tick() {
         guard let session = active else { return }
         elapsed = Date().timeIntervalSince(session.started)
+        // 没有链接：只计时，不检测窗口，也就不会因为「离开」而自动结束，只能手动结束。
+        guard let target = session.url else { return }
         guard !checking else { return }
         checking = true
         let inGrace = elapsed < Self.grace
-        let target = session.url
         let currentBaseline = baseline
         let learned = learnedBundle
         Task { @MainActor in
@@ -612,17 +616,18 @@ struct FocusPanelView: View {
     }
 }
 
-/// 任务行上的播放键：有链接的任务才显示。
+/// 任务行上的播放键：所有未完成的任务都有。有链接的会打开页面并检测是否离开；没有链接的只计时，手动结束。
 struct FocusPlayButton: View {
     @ObservedObject var session: FocusSession
     let task: ScheduledTask
-    let url: URL
+    /// 任务里的链接（没有为 nil）。
+    let url: URL?
 
     private var running: Bool { session.active?.taskID == task.id }
 
     var body: some View {
         ItemActionButton(symbol: running ? "stop.circle.fill" : "play.circle",
-                         title: running ? "结束专注计时" : "专注计时：打开链接并开始计时；离开页面自动停止") {
+                         title: running ? "结束专注计时" : (url == nil ? "专注计时：开始计时，不检测窗口，需要手动结束" : "专注计时：打开链接并开始计时；离开页面自动停止")) {
             if running { session.stop(reason: "手动结束") } else { session.start(task: task, url: url) }
         }
         .foregroundStyle(running ? Color.red : Palette.success)
