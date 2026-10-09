@@ -272,7 +272,7 @@ struct NotesView: View {
                         Text("#\(number)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.muted)
                     }
                     Text(topic.title).font(.system(size: 13, weight: .medium)).lineLimit(1)
-                    if topic.completed { Image(systemName: "checkmark.circle.fill").font(.system(size: 11)).foregroundStyle(Palette.success) }
+                    if topic.dropped { Image(systemName: "xmark.circle.fill").font(.system(size: 11)).foregroundStyle(Palette.muted) } else if topic.completed { Image(systemName: "checkmark.circle.fill").font(.system(size: 11)).foregroundStyle(Palette.success) }
                 }
                 HStack(spacing: 8) {
                     Text("\(topic.count) 条").monospacedDigit()
@@ -339,7 +339,7 @@ struct NotesView: View {
                     Text(topic.title).font(.system(size: 18, weight: .semibold)).lineLimit(2)
                 }
                 HStack(spacing: 10) {
-                    if topic.completed { Label("已完成", systemImage: "checkmark.circle.fill").foregroundStyle(Palette.success) }
+                    if topic.dropped { Label("已放弃", systemImage: "nosign").foregroundStyle(Palette.muted) } else if topic.completed { Label("已完成", systemImage: "checkmark.circle.fill").foregroundStyle(Palette.success) }
                     if topic.deleted { Label("任务已删除", systemImage: "trash").foregroundStyle(Palette.deadline) }
                     if let due = topic.dueDate { Label("截止 \(due.relativeLabel)", systemImage: "clock") }
                     if topic.focusSeconds >= 1 { Label("已专注 \(FocusSession.brief(topic.focusSeconds))", systemImage: "hourglass") }
@@ -572,8 +572,8 @@ struct NotesView: View {
             DispatchQueue.main.async { withAnimation(Motion.quick) { proxy.scrollTo(anchor, anchor: .top) } }
         } label: {
             HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Image(systemName: chapter.taskID == nil ? "square.and.pencil" : (chapter.completed ? "checkmark.circle.fill" : "circle"))
-                    .font(.system(size: 10)).foregroundStyle(chapter.completed ? Palette.success : Palette.muted)
+                Image(systemName: chapter.taskID == nil ? "square.and.pencil" : (chapter.dropped ? "xmark.circle.fill" : (chapter.completed ? "checkmark.circle.fill" : "circle")))
+                    .font(.system(size: 10)).foregroundStyle(chapter.completed && !chapter.dropped ? Palette.success : Palette.muted)
                 if let number = chapter.number {
                     Text("#\(number)").font(.system(size: 10, design: .monospaced)).foregroundStyle(Palette.muted)
                 }
@@ -617,8 +617,8 @@ struct NotesView: View {
             .help(folded ? "展开这一章" : "折叠这一章").accessibilityLabel(folded ? "展开章节" : "折叠章节")
             Button { if let id = chapter.taskID, canOpen { select(task: id) } } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: chapter.taskID == nil ? "square.and.pencil" : (chapter.completed ? "checkmark.circle.fill" : "circle"))
-                        .foregroundStyle(chapter.completed ? Palette.success : Palette.muted).font(.system(size: 12))
+                    Image(systemName: chapter.taskID == nil ? "square.and.pencil" : (chapter.dropped ? "xmark.circle.fill" : (chapter.completed ? "checkmark.circle.fill" : "circle")))
+                        .foregroundStyle(chapter.completed && !chapter.dropped ? Palette.success : Palette.muted).font(.system(size: 12))
                     if let number = chapter.number {
                         Text("#\(number)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Palette.muted)
                     }
@@ -724,7 +724,7 @@ struct NotesView: View {
     static func markdown(tag: String, tasks: [ScheduledTask], notes: [JournalStore.LoggedLog]) -> String {
         var lines = ["# #\(tag)", ""]
         for item in tasks {
-            lines.append("- [\(item.task.completed ? "x" : " ")] \(item.task.number.map { "#\($0) " } ?? "")\(String(TaskText.rendered(item.task.title).characters))")
+            lines.append("- [\(item.task.isDone ? "x" : (item.task.isDropped ? "-" : " "))] \(item.task.number.map { "#\($0) " } ?? "")\(String(TaskText.rendered(item.task.title).characters))")
         }
         if !tasks.isEmpty { lines.append("") }
         for group in Dictionary(grouping: notes, by: \.key).sorted(by: { $0.key < $1.key }) {

@@ -89,7 +89,7 @@ struct LinkPickerView: View {
                             .font(.system(size: 13)).lineLimit(1)
                         if item.id == store.focusTaskID { Image(systemName: "timer").foregroundStyle(Palette.success).font(.system(size: 10)) }
                         if item.id == store.pinnedTask?.id { Image(systemName: "pin.fill").foregroundStyle(Palette.accent).font(.system(size: 10)) }
-                        if item.task.completed { Image(systemName: "checkmark.circle.fill").foregroundStyle(Palette.success).font(.system(size: 10)) }
+                        if item.task.isDropped { Image(systemName: "xmark.circle.fill").foregroundStyle(Palette.muted).font(.system(size: 10)) } else if item.task.completed { Image(systemName: "checkmark.circle.fill").foregroundStyle(Palette.success).font(.system(size: 10)) }
                     }
                     HStack(spacing: 6) {
                         if let due = item.task.dueDate { Text("截止 " + due.relativeLabel) }

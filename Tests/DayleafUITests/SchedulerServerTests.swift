@@ -49,6 +49,28 @@ final class SchedulerServiceTests: XCTestCase {
         XCTAssertEqual(todayLogs(store).last?.taskNumber, 1, "显式指定仍然优先")
     }
 
+    func testDropAndRestoreThroughTheService() throws {
+        let (service, store, _) = try make()
+        var response = service.handle(WireRequest(op: .drop, task: 2))
+        XCTAssertTrue(response.ok, response.error ?? "")
+        XCTAssertTrue(response.message?.contains("已放弃") == true)
+        XCTAssertTrue(store.locate(number: 2)!.task.isDropped)
+
+        response = service.handle(WireRequest(op: .done, task: 2))
+        XCTAssertTrue(response.ok)
+        XCTAssertTrue(store.locate(number: 2)!.task.isDone, "放弃的可以直接标记完成")
+
+        response = service.handle(WireRequest(op: .drop, task: 2))
+        XCTAssertFalse(response.ok, "已完成的不能放弃")
+
+        _ = service.handle(WireRequest(op: .undone, task: 2))
+        _ = service.handle(WireRequest(op: .drop, task: 2))
+        response = service.handle(WireRequest(op: .undone, task: 2))
+        XCTAssertTrue(response.message?.contains("已恢复") == true)
+        XCTAssertFalse(store.locate(number: 2)!.task.completed)
+        XCTAssertFalse(service.handle(WireRequest(op: .drop, task: 99)).ok)
+    }
+
     func testLogKindsDoneCompletesOnlyAnExplicitTaskAndBadInputIsRejected() throws {
         let (service, store, _) = try make()
         var response = service.handle(WireRequest(op: .log, text: "/block 卡在公式", task: 1))

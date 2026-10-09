@@ -18,7 +18,7 @@ public enum SchedulerWire {
 }
 
 public struct WireRequest: Codable, Equatable {
-    public enum Op: String, Codable { case ping, status, log, todo, done, undone }
+    public enum Op: String, Codable { case ping, status, log, todo, done, undone, drop }
     public var version = SchedulerWire.version
     public var op: Op
     /// log：日志正文（可以以 /done /block /plan 开头）；todo：待办（支持「明天 15:00 开会」等自然语言）。

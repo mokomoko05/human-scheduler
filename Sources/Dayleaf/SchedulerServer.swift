@@ -31,6 +31,7 @@ final class SchedulerService {
         case .todo: return todo(request)
         case .done: return setCompleted(true, request)
         case .undone: return setCompleted(false, request)
+        case .drop: return dropTask(request)
         }
     }
 
@@ -138,12 +139,29 @@ final class SchedulerService {
         guard !store.isReadOnly else { return .failure("当前数据只读，无法写入。") }
         guard let number = request.task else { return .failure("缺少任务编号。") }
         guard let item = store.locate(number: number) else { return .failure("没有编号为 #\(number) 的任务。") }
+        if item.task.isDropped {
+            // 放弃的待办：done 先恢复再完成，undone 就是恢复。
+            store.toggleTodo(item.id, on: item.date)
+            if completed { store.toggleTodo(item.id, on: item.date) }
+            store.save()
+            return WireResponse(ok: true, message: (completed ? "已完成 " : "已恢复 ") + label(item), number: number)
+        }
         if item.task.completed == completed {
             return WireResponse(ok: true, message: label(item) + (completed ? " 本来就是完成状态" : " 本来就没有完成"), number: number)
         }
         store.toggleTodo(item.id, on: item.date)
         store.save()
         return WireResponse(ok: true, message: (completed ? "已完成 " : "已取消完成 ") + label(item), number: number)
+    }
+
+    /// 放弃一个待办（不用再做了，留着记录）；已经放弃的恢复。已完成的先 undone。
+    private func dropTask(_ request: WireRequest) -> WireResponse {
+        guard !store.isReadOnly else { return .failure("当前数据只读，无法写入。") }
+        guard let number = request.task else { return .failure("缺少任务编号。") }
+        guard let item = store.locate(number: number) else { return .failure("没有编号为 #\(number) 的任务。") }
+        guard store.dropTodo(item.id, on: item.date) else { return .failure(label(item) + " 已经完成，不能放弃；要改请先 sched undone \(number)。") }
+        store.save()
+        return WireResponse(ok: true, message: (item.task.isDropped ? "已恢复 " : "已放弃 ") + label(item), number: number)
     }
 }
 

@@ -369,6 +369,7 @@ public struct NotebookChapter: Identifiable {
     public let number: Int?
     public let title: String
     public let completed: Bool
+    public var dropped = false
     public let notes: [JournalStore.LoggedLog]
     public var id: String { taskID?.uuidString ?? "direct" }
 }
@@ -388,7 +389,7 @@ extension JournalStore {
             used.insert(item.id)
             result.append(NotebookChapter(taskID: item.id, number: item.task.number,
                                           title: String(TaskText.rendered(item.task.title).characters),
-                                          completed: item.task.completed, notes: grouped[item.id] ?? []))
+                                          completed: item.task.completed, dropped: item.task.isDropped, notes: grouped[item.id] ?? []))
         }
         let others = grouped.compactMap { key, value -> (UUID, [LoggedLog])? in key.map { ($0, value) } }
             .filter { !used.contains($0.0) }
@@ -397,7 +398,7 @@ extension JournalStore {
             let live = locate(id)
             result.append(NotebookChapter(taskID: id, number: live?.task.number ?? items.first?.log.taskNumber,
                                           title: live.map { String(TaskText.rendered($0.task.title).characters) } ?? items.first?.log.taskTitle ?? "（任务已删除）",
-                                          completed: live?.task.completed ?? false, notes: items))
+                                          completed: live?.task.completed ?? false, dropped: live?.task.isDropped ?? false, notes: items))
         }
         return result
     }

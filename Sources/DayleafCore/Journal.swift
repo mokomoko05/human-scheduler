@@ -5,7 +5,10 @@ public struct Todo: Codable, Identifiable, Equatable {
     public var id: UUID
     public var title: String
     public var calendarName = ""
+    /// 「不再需要做了」：已关闭但不算完成。放弃的待办 `completed` 也为 true（所以所有「未完成」的筛选、逾期、提醒都自然排除它），
+    /// 用 `isDone` / `isDropped` 区分是真的做完了还是放弃了。
     public var completed: Bool
+    public var dropped = false
     /// 截止日期一改，手动排的位置就作废，按新的截止时间重新排。
     public var dueDate: Date? {
         didSet { if dueDate != oldValue { listPosition = nil } }
@@ -24,6 +27,10 @@ public struct Todo: Codable, Identifiable, Equatable {
     /// 标签（不含 `#`）：把零散的小待办归到同一个大主题下，笔记和搜索都能按标签汇总。
     public var tags: [String] = []
 
+    /// 真的做完了（不含放弃）。
+    public var isDone: Bool { completed && !dropped }
+    public var isDropped: Bool { completed && dropped }
+
     /// 没有截止日期的任务排在最后。
     public static let undatedSortKey = 4_102_444_800.0
 
@@ -36,7 +43,7 @@ public struct Todo: Codable, Identifiable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, calendarName, completed, dueDate, dueHasTime, reminderMinutes, repeatRule, repeatMonthDay, nextOccurrenceID, number, focusSeconds, listPosition, tags
+        case id, title, calendarName, completed, dropped, dueDate, dueHasTime, reminderMinutes, repeatRule, repeatMonthDay, nextOccurrenceID, number, focusSeconds, listPosition, tags
     }
 
     public init(from decoder: Decoder) throws {
@@ -45,6 +52,8 @@ public struct Todo: Codable, Identifiable, Equatable {
         title = try values.decode(String.self, forKey: .title)
         calendarName = try values.decodeIfPresent(String.self, forKey: .calendarName) ?? ""
         completed = try values.decode(Bool.self, forKey: .completed)
+        dropped = try values.decodeIfPresent(Bool.self, forKey: .dropped) ?? false
+        if !completed { dropped = false }
         dueDate = try values.decodeIfPresent(Date.self, forKey: .dueDate)
         dueHasTime = try values.decodeIfPresent(Bool.self, forKey: .dueHasTime) ?? false
         reminderMinutes = try values.decodeIfPresent(Int.self, forKey: .reminderMinutes)
@@ -77,7 +86,7 @@ public struct DayEntry: Codable, Equatable {
     public var deadlines: [Todo] { todos }
     public var deadlineDraft = ""
     public var hasContent: Bool { !todos.isEmpty || !summary.isEmpty || !deadlineDraft.isEmpty || !logs.isEmpty || !logDraft.isEmpty || logTaskID != nil || !logDraftImages.isEmpty || !logDraftTags.isEmpty }
-    public var completedCount: Int { todos.filter(\.completed).count }
+    public var completedCount: Int { todos.filter(\.isDone).count }
 
     public init() {}
 
@@ -306,10 +315,23 @@ public final class JournalStore: ObservableObject {
         replaceDays(updated, action: "完成状态")
     }
 
-    private func toggleTask(_ id: UUID, on date: Date, now: Date, in updated: inout [String: DayEntry]) {
+    /// 放弃一个待办（不用再做了，但留着记录：编号、笔记、专注时长都在）；已经放弃的再调一次就恢复成未完成。
+    /// 已经完成的待办不能放弃（先取消完成）。重复待办放弃的是这一次，下一次照常生成。
+    @discardableResult
+    public func dropTodo(_ id: UUID, on date: Date, now: Date = Date()) -> Bool {
+        guard !isReadOnly, let task = tasks().first(where: { $0.id == id })?.task, !task.isDone else { return false }
+        var updated = days
+        toggleTask(id, on: date, now: now, dropping: true, in: &updated)
+        replaceDays(updated, action: task.isDropped ? "恢复待办" : "放弃待办")
+        return true
+    }
+
+    private func toggleTask(_ id: UUID, on date: Date, now: Date, dropping: Bool = false, in updated: inout [String: DayEntry]) {
         let key = JournalDates.key(date)
         guard let index = updated[key]?.todos.firstIndex(where: { $0.id == id }) else { return }
         updated[key]!.todos[index].completed.toggle()
+        // 完成 → 做完了；放弃 → dropping；再点一次（取消完成 / 恢复）→ 都回到未完成。
+        updated[key]!.todos[index].dropped = updated[key]!.todos[index].completed && dropping
         let task = updated[key]!.todos[index]
         var occurrence = task.repeatRule.nextDate(after: JournalDates.calendar.startOfDay(for: date), monthDay: task.repeatMonthDay)
         while let candidate = occurrence, candidate <= JournalDates.calendar.startOfDay(for: now) {
@@ -319,6 +341,7 @@ public final class JournalStore: ObservableObject {
             var next = allocate(task)
             next.id = UUID()
             next.completed = false
+            next.dropped = false
             next.nextOccurrenceID = nil
             if let due = task.dueDate {
                 let offset = JournalDates.calendar.dateComponents([.day], from: JournalDates.calendar.startOfDay(for: date), to: nextDate).day!
@@ -769,6 +792,7 @@ public final class JournalStore: ObservableObject {
         public let imageCount: Int
         public let lastActivity: Date
         public let completed: Bool
+        public let dropped: Bool
         public let deleted: Bool
         public let dueDate: Date?
         public let focusSeconds: TimeInterval
@@ -791,7 +815,7 @@ public final class JournalStore: ObservableObject {
             return NoteTopic(id: id, number: located?.task.number ?? value.number,
                              title: located.map { String(TaskText.rendered($0.task.title).characters) } ?? value.title,
                              count: value.count, imageCount: value.images, lastActivity: value.latest,
-                             completed: located?.task.completed ?? false, deleted: located == nil, dueDate: located?.task.dueDate,
+                             completed: located?.task.completed ?? false, dropped: located?.task.isDropped ?? false, deleted: located == nil, dueDate: located?.task.dueDate,
                              focusSeconds: located?.task.focusSeconds ?? 0, tags: located?.task.tags ?? [])
         }.sorted { $0.lastActivity > $1.lastActivity }
     }

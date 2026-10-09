@@ -185,7 +185,7 @@ public enum DailyReview {
             }
             if kind == .done {
                 let logged = Set(logs.compactMap(\.taskID))
-                lines += entry.todos.filter { $0.completed && !logged.contains($0.id) }
+                lines += entry.todos.filter { $0.isDone && !logged.contains($0.id) }
                     .map { "- " + String(TaskText.rendered($0.title).characters) }
             }
             if !lines.isEmpty || kind != .note { sections.append("## \(kind.title)\n" + lines.joined(separator: "\n")) }

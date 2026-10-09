@@ -183,6 +183,8 @@ public enum LogRenderer {
         public let number: Int
         public let title: String
         public let completed: Bool
+        /// 放弃的待办（也算 completed）。
+        public var dropped = false
         public let due: Date?
         public let dueHasTime: Bool
         public let focusSeconds: TimeInterval
@@ -195,7 +197,7 @@ public enum LogRenderer {
         let counts = Dictionary(grouping: store.allLogs(includeFocus: false).compactMap { $0.log.taskID }, by: { $0 }).mapValues(\.count)
         return store.sortedTasks().filter { includeCompleted || !$0.task.completed }.compactMap { item in
             guard let number = item.task.number else { return nil }
-            return TaskRow(number: number, title: String(TaskText.rendered(item.task.title).characters), completed: item.task.completed,
+            return TaskRow(number: number, title: String(TaskText.rendered(item.task.title).characters), completed: item.task.completed, dropped: item.task.isDropped,
                            due: item.task.dueDate, dueHasTime: item.task.dueHasTime, focusSeconds: item.task.focusSeconds,
                            noteCount: counts[item.id] ?? 0, tags: item.task.tags)
         }
@@ -203,7 +205,7 @@ public enum LogRenderer {
 
     public static func tasks(_ rows: [TaskRow], ctx: RenderContext, now: Date = Date()) -> [String] {
         rows.map { row in
-            let box = row.completed ? ctx.style.green("✓") : ctx.style.gray("○")
+            let box = row.dropped ? ctx.style.gray("✗") : (row.completed ? ctx.style.green("✓") : ctx.style.gray("○"))
             let number = ctx.style.yellow(("#\(row.number)").padding(toLength: 5, withPad: " ", startingAt: 0))
             var meta: [String] = []
             if let due = row.due {

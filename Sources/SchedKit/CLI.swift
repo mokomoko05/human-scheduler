@@ -107,7 +107,8 @@ public enum CLI {
       sched log [-t N] [-i 图片]... <正文>   记一条日志；正文可以 /done /block /plan 开头，也可以以 #3 开头关联任务；- 表示读标准输入
       sched todo <内容>          添加待办，支持「明天 15:00 开会 #标签」（#标签 要加引号，bash 里 # 会被当成注释）
       sched done <N>             完成任务 #N
-      sched undone <N>           取消完成任务 #N
+      sched undone <N>           取消完成任务 #N（放弃的也用它恢复）
+      sched drop <N>             放弃任务 #N（不用做了，留着记录；再来一次恢复）
 
     筛选（logs / pick / notes 通用）
       -t, --task N[,N]           只看这些任务的日志        -d, --date D       只看某一天
@@ -205,6 +206,7 @@ public enum CLI {
             case "todo": return write(.todo, rest)
             case "done": return write(.done, rest)
             case "undone": return write(.undone, rest)
+            case "drop": return write(.drop, rest)
             default: return fail("不认识的命令「\(command)」。运行 sched help 查看用法。", code: 2)
             }
         }
@@ -327,7 +329,7 @@ public enum CLI {
                 say(ctx.style.bold(TerminalText.truncate(title, to: width)))
                 var meta: [String] = ["\(rows.count) 条笔记"]
                 if let located {
-                    if located.task.completed { meta.append("已完成") }
+                    if located.task.isDropped { meta.append("已放弃") } else if located.task.completed { meta.append("已完成") }
                     if let due = located.task.dueDate { meta.append("截止 \(LogRenderer.relativeDay(due, now: env.now))") }
                     if located.task.focusSeconds >= 1 { meta.append("已专注 \(LogRenderer.brief(located.task.focusSeconds))") }
                     if !located.task.tags.isEmpty { meta.append(located.task.tags.map { "#" + $0 }.joined(separator: " ")) }
@@ -358,7 +360,7 @@ public enum CLI {
                 say(ctx.style.bold(TerminalText.truncate(title, to: width)))
                 say(ctx.style.dim("\(tasks.count) 个待办（\(tasks.filter { !$0.task.completed }.count) 个未完成） · \(rows.count) 条笔记"))
                 for item in tasks {
-                    let box = item.task.completed ? ctx.style.green("✓") : ctx.style.gray("○")
+                    let box = item.task.isDropped ? ctx.style.gray("✗") : (item.task.completed ? ctx.style.green("✓") : ctx.style.gray("○"))
                     let name = (item.task.number.map { "#\($0) " } ?? "") + String(TaskText.rendered(item.task.title).characters)
                     say("  \(box) " + TerminalText.truncate(name, to: max(10, width - 4)))
                 }
@@ -403,7 +405,7 @@ public enum CLI {
             }
             if format() == "json" {
                 let items: [[String: Any]] = rows.map { row in
-                    var item: [String: Any] = ["number": row.number, "title": row.title, "completed": row.completed, "notes": row.noteCount, "focus_seconds": Int(row.focusSeconds), "tags": row.tags]
+                    var item: [String: Any] = ["number": row.number, "title": row.title, "completed": row.completed, "dropped": row.dropped, "notes": row.noteCount, "focus_seconds": Int(row.focusSeconds), "tags": row.tags]
                     if let due = row.due { item["due"] = ISO8601DateFormatter().string(from: due) }
                     return item
                 }
@@ -486,7 +488,7 @@ public enum CLI {
                 let text = rest.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !text.isEmpty else { return fail("用法：sched todo <内容>，例如 sched todo 明天 15:00 开会", code: 2) }
                 request.text = text
-            case .done, .undone:
+            case .done, .undone, .drop:
                 guard let token = rest.first, let number = LogCommand.taskNumber(token) else { return fail("用法：sched \(op.rawValue) <任务编号>", code: 2) }
                 request.task = number
             default: return fail("内部错误", code: 2)
