@@ -27,6 +27,7 @@ struct TaskLinkText: NSViewRepresentable {
         view.textContainerInset = NSSize(width: 5, height: 4)
         view.textContainer?.lineFragmentPadding = 0
         view.textContainer?.maximumNumberOfLines = maxLines
+        view.measurer.update(NSAttributedString(), maxLines: maxLines)
         view.textContainer?.lineBreakMode = .byTruncatingTail
         view.textContainer?.widthTracksTextView = false
         view.isHorizontallyResizable = false
@@ -56,7 +57,9 @@ struct TaskLinkText: NSViewRepresentable {
             view.foreground = foreground
             view.monospaced = monospaced
             view.compactLines = compactLines
-            view.textStorage?.setAttributedString(Self.styledText(source, completed: completed, color: foreground, fontSize: fontSize, displayName: displayName, monospaced: monospaced, compactLines: compactLines))
+            let styled = Self.styledText(source, completed: completed, color: foreground, fontSize: fontSize, displayName: displayName, monospaced: monospaced, compactLines: compactLines)
+            view.textStorage?.setAttributedString(styled)
+            view.measurer.update(styled, maxLines: maxLines)
             view.toolTip = source
             view.invalidateIntrinsicContentSize()
             view.needsDisplay = true
@@ -66,13 +69,11 @@ struct TaskLinkText: NSViewRepresentable {
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: InteractiveTaskText, context: Context) -> CGSize? {
         let width = max(1, proposal.width ?? 240)
-        guard let container = nsView.textContainer, let manager = nsView.layoutManager else { return nil }
-        // SwiftUI 会用多个宽度试探；测量后必须还原容器宽度，否则最终显示会沿用最后一次试探的窄宽度，文字被挤成竖条。
-        let original = container.containerSize
-        defer { container.containerSize = original; manager.ensureLayout(for: container) }
-        container.containerSize = NSSize(width: max(1, width - nsView.textContainerInset.width * 2), height: .greatestFiniteMagnitude)
-        manager.ensureLayout(for: container)
-        return CGSize(width: width, height: max(UIScale.pt(fontSize) + 4, ceil(manager.usedRect(for: container).height)) + nsView.textContainerInset.height * 2)
+        // 用单独的排版栈测量，不碰视图自己的文本容器（SwiftUI 会用很多个宽度试探，缩放窗口时每帧都是新宽度；
+        // 之前是改容器、排版、再还原重排，一次测量要排两遍中文）。同一个宽度的结果缓存起来。
+        let textWidth = max(1, width - nsView.textContainerInset.width * 2)
+        let height = nsView.measurer.height(forWidth: textWidth)
+        return CGSize(width: width, height: max(UIScale.pt(fontSize) + 4, height) + nsView.textContainerInset.height * 2)
     }
 
     static func styledText(_ source: String, completed: Bool, color: NSColor, fontSize: CGFloat, displayName: String? = nil, monospaced: Bool = false, compactLines: Bool = false) -> NSAttributedString {
@@ -95,7 +96,43 @@ struct TaskLinkText: NSViewRepresentable {
     }
 }
 
+/// 测量文字高度用的独立排版栈，结果按宽度缓存；文字或样式变了就清掉。
+final class TextMeasurer {
+    private let storage = NSTextStorage()
+    private let manager = NSLayoutManager()
+    private let container = NSTextContainer()
+    private var cache: [Int: CGFloat] = [:]
+
+    init() {
+        storage.addLayoutManager(manager)
+        manager.addTextContainer(container)
+        container.lineFragmentPadding = 0
+        container.lineBreakMode = .byTruncatingTail
+        container.widthTracksTextView = false
+    }
+
+    func update(_ text: NSAttributedString, maxLines: Int) {
+        storage.setAttributedString(text)
+        container.maximumNumberOfLines = maxLines
+        cache.removeAll(keepingCapacity: true)
+    }
+
+    func height(forWidth rawWidth: CGFloat) -> CGFloat {
+        // SwiftUI 会用无限宽试探「最理想的大小」。
+        let width = rawWidth.isFinite ? min(rawWidth, 100_000) : 100_000
+        let key = Int((width * 2).rounded())
+        if let hit = cache[key] { return hit }
+        container.containerSize = NSSize(width: width, height: .greatestFiniteMagnitude)
+        manager.ensureLayout(for: container)
+        let height = ceil(manager.usedRect(for: container).height)
+        if cache.count > 64 { cache.removeAll(keepingCapacity: true) }
+        cache[key] = height
+        return height
+    }
+}
+
 final class InteractiveTaskText: NSTextView {
+    let measurer = TextMeasurer()
     var source: String?
     var displayName: String?
     var completed = false

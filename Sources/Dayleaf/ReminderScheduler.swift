@@ -9,13 +9,15 @@ final class ReminderScheduler: NSObject, ObservableObject, UNUserNotificationCen
     var isEnabled = true
     var onComplete: ((String) -> Void)?
     private let store: JournalStore
-    private let center = UNUserNotificationCenter.current()
+    /// 用到时才取：不在应用包里运行（测试）时没有通知中心，取了会崩溃，所以那时 `isEnabled` 要关掉。
+    private lazy var center = UNUserNotificationCenter.current()
     private var changes: AnyCancellable?
     private var pending: Task<Void, Never>?
 
     init(store: JournalStore) {
         self.store = store
         super.init()
+        guard Bundle.main.bundleURL.pathExtension == "app" else { isEnabled = false; return }
         center.delegate = self
         center.setNotificationCategories([
             UNNotificationCategory(identifier: Self.category, actions: [

@@ -120,7 +120,8 @@ struct NativeTaskHandle: NSViewRepresentable {
         view.drawsHandle = drawsHandle
         view.edgeOnly = edgeOnly
         view.onSelect = select
-        view.title = String(TaskText.rendered(task.title, alias: task.calendarName).characters)
+        // 标题只在开始拖动时才用到：解析 Markdown 和链接检测不便宜，缩放窗口时每帧都会走到这里，所以只存原文。
+        view.titleSource = (task.title, task.calendarName)
         view.appearance = NSAppearance(named: context.environment.colorScheme == .dark ? .darkAqua : .aqua)
         view.needsDisplay = true
         view.window?.invalidateCursorRects(for: view)
@@ -129,7 +130,9 @@ struct NativeTaskHandle: NSViewRepresentable {
 
 final class TaskHandleView: NSView, NSDraggingSource {
     var taskID: UUID?
-    var title = ""
+    var titleSource: (title: String, alias: String) = ("", "")
+    /// 拖到日历时显示的标题。
+    var title: String { String(TaskText.rendered(titleSource.title, alias: titleSource.alias).characters) }
     var drawsHandle = true
     var edgeOnly = false
     var onSelect: (() -> Void)?
