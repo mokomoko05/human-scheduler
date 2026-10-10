@@ -12,6 +12,14 @@ final class WorkspaceInteraction: ObservableObject {
     @Published var logFocusRequest = 0
     /// 日志按这些任务筛选（跨日期）；为空表示显示当天全部日志。
     @Published var logFilter: Set<UUID> = []
+    /// 请某一行打开它的面板（键盘或菜单触发）；行打开后清掉。
+    @Published var taskPopover: TaskPopoverRequest?
+}
+
+struct TaskPopoverRequest: Equatable {
+    enum Kind { case details, tags }
+    let id: UUID
+    let kind: Kind
 }
 
 struct SummaryEditor: NSViewRepresentable {

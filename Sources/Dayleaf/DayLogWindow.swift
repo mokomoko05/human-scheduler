@@ -7,6 +7,12 @@ private final class DayLogWindow: QuietWindow {
     override func cancelOperation(_ sender: Any?) { close() }
 }
 
+/// 日志窗口正在看哪一天。
+@MainActor
+final class DayLogDay: ObservableObject {
+    @Published var date = JournalDates.calendar.startOfDay(for: Date())
+}
+
 /// 当天日志窗口（⌘J）：独立窗口，可以拖边缘调整大小；大小和位置会被记住。
 /// 和主窗口、笔记、终端互不依赖，各自开关。
 @MainActor
@@ -22,7 +28,11 @@ final class DayLogWindowController: NSObject, NSWindowDelegate {
     }
     private(set) var window: NSWindow?
     var interaction = WorkspaceInteraction()
-    var toast = ToastCenter()
+    /// 日志窗口自己的提示条：复制、删除的「撤销」出现在这个窗口里，而不是主窗口。
+    let toast = ToastCenter()
+    /// 正在看的那一天：窗口一直复用同一个视图，换日期只改这个，选中和编辑状态不会因为重新打开而丢掉。
+    let day = DayLogDay()
+    private var store: JournalStore?
     /// 关闭后，Scheduler 别的窗口还开着就把焦点交给它；由 AppDelegate 设置。
     var handoffWindow: () -> NSWindow? = { nil }
     /// 点日志里的任务标签跳到主窗口的任务：把主窗口调到前面；由 AppDelegate 设置。
@@ -34,14 +44,31 @@ final class DayLogWindowController: NSObject, NSWindowDelegate {
     func show(store: JournalStore, date: Date) {
         let window = self.window ?? makeWindow()
         self.window = window
-        let view = DayLogView(store: store, initialDate: date, close: { [weak self] in self?.close() },
-                              showMain: { [weak self] in self?.showMainWindow() })
-            .environmentObject(interaction).environmentObject(toast)
-        if let host = window.contentViewController as? NSHostingController<AnyView> {
-            host.rootView = AnyView(view.id(UUID()))
+        setDate(date)
+        if self.store !== store, let host = window.contentViewController as? NSHostingController<AnyView> {
+            self.store = store
+            let view = DayLogView(store: store, day: day, close: { [weak self] in self?.close() },
+                                  showMain: { [weak self] in self?.showMainWindow() })
+                .environmentObject(interaction).environmentObject(toast)
+            host.rootView = AnyView(view)
         }
         window.makeKeyAndOrderFront(nil)
     }
+
+    /// 换到某一天（主窗口选了别的日期时也会调用）。先提交正在编辑的内容。
+    func setDate(_ date: Date) {
+        let start = JournalDates.calendar.startOfDay(for: date)
+        guard day.date != start else { return }
+        NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+        day.date = start
+    }
+
+    /// 前一天 / 后一天（日志窗口是当前窗口时，菜单里的「前一天」「后一天」作用在这里）。
+    func shift(_ days: Int) {
+        setDate(JournalDates.calendar.date(byAdding: .day, value: days, to: day.date) ?? day.date)
+    }
+
+    var isKey: Bool { window?.isKeyWindow == true }
 
     func close() { window?.close() }
 

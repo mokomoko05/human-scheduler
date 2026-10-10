@@ -51,6 +51,8 @@ extension EnvironmentValues {
 
 /// 菜单栏、键盘和通知发给主界面的命令。
 enum AppCommand {
+    /// 选中的任务：打开截止日期、标签面板；固定、放弃、开始专注、打开笔记（键盘也能做到扇形菜单里的事）。
+    case deadlineSelected, tagsSelected, pinSelected, dropSelected, focusSelected, notesSelected
     case newTodo, newLog, insertLink, today, search
     case shiftDay(Int), shiftMonth(Int)
     case agenda(AgendaFilter)
@@ -64,6 +66,19 @@ enum AppCommand {
     case notesForTask(UUID)
 }
 
+/// 别的窗口（笔记、日志）要动主窗口时用的入口；由 AppDelegate 设置，测试里都是空操作。
+@MainActor
+enum AppRouter {
+    /// 把主窗口调到前面（它可能被收起了）。
+    static var presentMain: () -> Void = {}
+    /// 主窗口是不是当前的键盘窗口。
+    static var mainIsKey: () -> Bool = { true }
+    static var showSettings: () -> Void = {}
+    static var showQuickCapture: () -> Void = {}
+    /// 打开某个任务的笔记。
+    static var openNotes: (UUID) -> Void = { _ in }
+}
+
 @MainActor
 final class CommandCenter: ObservableObject {
     let subject = PassthroughSubject<AppCommand, Never>()
@@ -73,6 +88,9 @@ final class CommandCenter: ObservableObject {
 /// 窗口底部短暂出现的反馈条，可带一个操作（通常是「撤销」）。
 @MainActor
 final class ToastCenter: ObservableObject {
+    /// 哪些操作完成后要给一个带「撤销」的提示，以及提示的文字。
+    static let undoMessages = ["删除任务": "已删除事项", "删除日志": "已删除日志", "移动任务": "已移动事项", "移到今天": "已把逾期事项的截止日期改到今天",
+                               "完成状态": "已更新完成状态", "放弃待办": "已放弃", "恢复待办": "已恢复", "重命名标签": "已重命名标签", "删除标签": "已删除标签（内容都保留）"]
     struct Toast: Identifiable {
         let id = UUID()
         let message: String

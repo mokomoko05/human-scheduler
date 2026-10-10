@@ -185,10 +185,9 @@ final class QuickCaptureController: NSObject, NSMenuDelegate, NSWindowDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         refreshHotKeyLabels()
-        let now = Date()
-        let remaining = store.entry(for: now).todos.filter { !$0.completed }.count
-        let overdue = store.overdueCount(now: now)
-        summaryItem.title = overdue > 0 ? "今日剩余 \(remaining) · 逾期 \(overdue)" : "今日剩余 \(remaining)"
+        // 和清单顶部的摘要同一个口径：按截止日期算。
+        let summary = store.taskSummary()
+        summaryItem.title = summary.overdue > 0 ? "今天截止 \(summary.dueToday) · 逾期 \(summary.overdue)" : "今天截止 \(summary.dueToday)"
     }
 
     @objc private func captureTodo() { toggle(.todo) }

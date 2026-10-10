@@ -84,9 +84,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         _ = ThemeStore.shared   // 读取已保存的配色和外观并应用
         let dayLog = DayLogWindowController.shared
         dayLog.interaction = interaction
-        dayLog.toast = toast
         dayLog.handoffWindow = { [unowned self] in otherWindowForHandoff(excluding: DayLogWindowController.shared.window) }
         dayLog.showMainWindow = { [unowned self] in showMainWindowSoftly() }
+        AppRouter.presentMain = { [unowned self] in if !(window.isVisible && !window.isMiniaturized) || NSApp.keyWindow !== window { showMainWindowSoftly() } }
+        AppRouter.mainIsKey = { [unowned self] in NSApp.keyWindow === window }
+        AppRouter.showSettings = { [unowned self] in settings.show() }
+        AppRouter.showQuickCapture = { [unowned self] in quickCapture.toggle(.todo) }
+        AppRouter.openNotes = { [unowned self] id in commands.send(.notesForTask(id)) }
         quickCapture = QuickCaptureController(store: store, openMain: { [weak self] in self?.showMainWindow() },
                                               openShell: { [weak self] in self?.shell.show() })
         UserDefaults.standard.register(defaults: [Prefs.clickExpands: true, Prefs.globalHotKey: true, Prefs.uiScale: 1.0])
@@ -334,6 +338,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         case 36, 76: guard interaction.selectedTaskID != nil else { return false }; commands.send(.editSelected)
         case 51, 117: guard interaction.selectedTaskID != nil else { return false }; commands.send(.deleteSelected)
         case 53: guard interaction.selectedTaskID != nil else { return false }; commands.send(.deselect)
+        // 选中任务时的字母键：和扇形菜单里的操作一一对应。
+        case 45 where interaction.selectedTaskID != nil && !shift: commands.send(.notesSelected)     // N
+        case 2 where interaction.selectedTaskID != nil && !shift: commands.send(.deadlineSelected)   // D
+        case 17 where interaction.selectedTaskID != nil && !shift: commands.send(.tagsSelected)      // T
+        case 35 where interaction.selectedTaskID != nil && !shift: commands.send(.pinSelected)       // P
+        case 7 where interaction.selectedTaskID != nil && !shift: commands.send(.dropSelected)       // X
+        case 3 where interaction.selectedTaskID != nil && !shift: commands.send(.focusSelected)      // F
         default: return false
         }
         return true
@@ -341,14 +352,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: - 撤销 / 重做
 
+    /// ⌘Z：输入框里有能撤销的打字就撤销打字；没有（比如刚在日志窗口里删了日志，光标还在输入框里）就撤销上一步操作。
     @objc private func undoAction(_ sender: Any?) {
-        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isEditable {
+        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isEditable, editor.undoManager?.canUndo == true {
             editor.undoManager?.undo()
         } else { store.undo() }
     }
 
     @objc private func redoAction(_ sender: Any?) {
-        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isEditable {
+        if let editor = NSApp.keyWindow?.firstResponder as? NSTextView, editor.isEditable, editor.undoManager?.canRedo == true {
             editor.undoManager?.redo()
         } else { store.redo() }
     }
@@ -471,6 +483,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func buildMenu() {
         let mainMenu = NSMenu()
         let send = { [commands] (command: AppCommand) in { if !(NSApp.keyWindow is TerminalWindow) { commands.send(command) } } }
+        /// 同一个快捷键：终端是当前窗口时做终端的事，否则做 Scheduler 的事。
+        let shell = self.shell
+        let either = { (terminal: @escaping (ShellWindowController) -> Void, other: @escaping () -> Void) in {
+            if NSApp.keyWindow is TerminalWindow { terminal(shell) } else { other() }
+        } }
+        let onlyInTerminal = { (action: @escaping (ShellWindowController) -> Void) in {
+            guard NSApp.keyWindow is TerminalWindow else { return }
+            action(shell)
+        } }
+        let dayLog = DayLogWindowController.shared
+        /// 换日期：日志窗口是当前窗口就换它看的那一天，否则换主窗口选中的日期。
+        let shiftDay = { [commands] (amount: Int) in { if dayLog.isKey { dayLog.shift(amount) } else { commands.send(.shiftDay(amount)) } } }
         let arrow = { (scalar: Int) in String(UnicodeScalar(scalar)!) }
         let left = arrow(NSLeftArrowFunctionKey), right = arrow(NSRightArrowFunctionKey)
 
@@ -490,7 +514,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             menuItem("写日志…", key: "l", send(.newLog)),
             menuItem("快速添加待办…") { [weak self] in self?.quickCapture.toggle(.todo) },
             menuItem("快速写日志…") { [weak self] in self?.quickCapture.toggle(.log) },
-            menuItem("插入链接…", send(.insertLink)),
+            menuItem("插入链接…    ⌘K", send(.insertLink)),
             .separator(),
             menuItem("导出为文件夹…", send(.export)),
             menuItem("备份与恢复…", send(.backups)),
@@ -523,22 +547,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 else if NSApp.keyWindow === NotesWindowController.shared.window { NotesWindowController.shared.close() }
                 else { commands.send(.notes) }
             },
-            menuItem("新建标签页", key: "t") { [weak self] in self?.shell.newTab() },
+            // ⌘T：终端里新建标签页；其他窗口里回到今天。
+            menuItem("新建标签页（终端）/ 回到今天", key: "t", either({ $0.newTab() }, { [commands] in
+                if dayLog.isKey { dayLog.setDate(Date()) } else { commands.send(.today) }
+            })),
             menuItem("关闭标签页 / 窗口", key: "w") { [weak self] in self?.closeKeyWindow() },
             .separator(),
             menuItem("向右分栏", key: "d") { [weak self] in if NSApp.keyWindow is TerminalWindow { self?.shell.splitPane(sideBySide: true) } },
             menuItem("向下分栏", key: "d", modifiers: [.command, .shift]) { [weak self] in if NSApp.keyWindow is TerminalWindow { self?.shell.splitPane(sideBySide: false) } },
             menuItem("关闭窗格", key: "w", modifiers: [.command, .option]) { [weak self] in if NSApp.keyWindow is TerminalWindow { self?.shell.closePane() } },
             .separator(),
-            menuItem("上一个窗格", key: "[") { [weak self] in self?.shell.selectPane(-1) },
-            menuItem("下一个窗格", key: "]") { [weak self] in self?.shell.selectPane(1) },
-            menuItem("上一个标签页", key: "[", modifiers: [.command, .shift]) { [weak self] in self?.shell.selectAdjacentTab(-1) },
-            menuItem("下一个标签页", key: "]", modifiers: [.command, .shift]) { [weak self] in self?.shell.selectAdjacentTab(1) },
+            // ⌘[ ⌘]：终端里切窗格；其他窗口里切月份。
+            menuItem("上一个窗格（终端）/ 上个月", key: "[", either({ $0.selectPane(-1) }, send(.shiftMonth(-1)))),
+            menuItem("下一个窗格（终端）/ 下个月", key: "]", either({ $0.selectPane(1) }, send(.shiftMonth(1)))),
+            menuItem("上一个标签页", key: "[", modifiers: [.command, .shift], onlyInTerminal { $0.selectAdjacentTab(-1) }),
+            menuItem("下一个标签页", key: "]", modifiers: [.command, .shift], onlyInTerminal { $0.selectAdjacentTab(1) }),
         ] + (1...9).map { number in
-            menuItem("切换到第 \(number) 个标签页", key: String(number)) { [weak self] in self?.shell.selectTab(at: number - 1) }
+            menuItem("切换到第 \(number) 个标签页", key: String(number), onlyInTerminal { $0.selectTab(at: number - 1) })
         } + [
             .separator(),
-            menuItem("清屏", key: "k") { [weak self] in self?.shell.clearScreen() },
+            // ⌘K：终端里清屏；其他窗口里插入链接。
+            menuItem("清屏（终端）/ 插入链接", key: "k", either({ $0.clearScreen() }, send(.insertLink))),
             .separator(),
             menuItem("显示 / 隐藏全部终端") { [weak self] in self?.shell.toggle() },
         ])
@@ -552,6 +581,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             menuItem("选择上一条（↑）", typingSensitive: true, send(.selectAdjacent(-1))),
             menuItem("选择下一条（↓）", typingSensitive: true, send(.selectAdjacent(1))),
             .separator(),
+            menuItem("打开笔记（N）", typingSensitive: true, send(.notesSelected)),
+            menuItem("截止日期…（D）", typingSensitive: true, send(.deadlineSelected)),
+            menuItem("标签…（T）", typingSensitive: true, send(.tagsSelected)),
+            menuItem("固定 / 取消固定（P）", typingSensitive: true, send(.pinSelected)),
+            menuItem("放弃 / 恢复（X）", typingSensitive: true, send(.dropSelected)),
+            menuItem("开始 / 结束专注（F）", typingSensitive: true, send(.focusSelected)),
+            .separator(),
             menuItem("把逾期事项的截止日期改到今天", key: "m", modifiers: [.command, .shift], send(.rollover)),
         ])
         mainMenu.addItem(task)
@@ -559,9 +595,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         notesMenuItem = menuItem("笔记（开 / 关）", send(.toggleNotes))
         applyNotesShortcut()
         let view = submenu("视图", [
-            menuItem("回到今天", send(.today)),
-            menuItem("前一天", key: left, modifiers: [.command, .option], typingSensitive: true, send(.shiftDay(-1))),
-            menuItem("后一天", key: right, modifiers: [.command, .option], typingSensitive: true, send(.shiftDay(1))),
+            menuItem("回到今天    ⌘T", { [commands] in if dayLog.isKey { dayLog.setDate(Date()) } else { commands.send(.today) } }),
+            menuItem("前一天", key: left, modifiers: [.command, .option], typingSensitive: true, shiftDay(-1)),
+            menuItem("后一天", key: right, modifiers: [.command, .option], typingSensitive: true, shiftDay(1)),
             menuItem("上个月", send(.shiftMonth(-1))),
             menuItem("下个月", send(.shiftMonth(1))),
             .separator(),

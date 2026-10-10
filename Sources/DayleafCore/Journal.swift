@@ -658,10 +658,13 @@ public final class JournalStore: ObservableObject {
     /// 专注计时的开始、结束记录：写进当天终端日志，关联任务，但带「专注」标记，笔记视图不显示。
     /// `seconds` 大于 0 时同时累加到任务的专注时长，和日志一起作为一次操作（撤销时一并还原）。
     @discardableResult
-    public func addFocusLog(_ text: String, taskID: UUID, now: Date = Date(), seconds: TimeInterval = 0) -> UUID? {
-        guard !isReadOnly, let located = locate(taskID) else { return nil }
+    public func addFocusLog(_ text: String, taskID: UUID, now: Date = Date(), seconds: TimeInterval = 0,
+                            fallback: (title: String, number: Int?)? = nil) -> UUID? {
+        // 任务已经删了（比如专注中把它删掉）：用开始时记下的名字写这条结束记录，时长没地方累加就不加。
+        let located = locate(taskID)
+        guard !isReadOnly, located != nil || fallback != nil else { return nil }
         var updated = days
-        if seconds > 0 {
+        if seconds > 0, let located {
             let homeKey = JournalDates.key(located.date)
             if let index = updated[homeKey]?.todos.firstIndex(where: { $0.id == taskID }) {
                 updated[homeKey]!.todos[index].focusSeconds += seconds
@@ -669,9 +672,9 @@ public final class JournalStore: ObservableObject {
         }
         let key = JournalDates.key(now)
         var entry = updated[key] ?? DayEntry()
-        let log = DailyLogEntry(createdAt: now, kind: .note, text: text, taskID: located.id,
-                                taskTitle: String(TaskText.rendered(located.task.title).characters),
-                                taskNumber: located.task.number, taskTags: located.task.tags, focus: true)
+        let log = DailyLogEntry(createdAt: now, kind: .note, text: text, taskID: taskID,
+                                taskTitle: located.map { String(TaskText.rendered($0.task.title).characters) } ?? fallback?.title,
+                                taskNumber: located?.task.number ?? fallback?.number, taskTags: located?.task.tags ?? [], focus: true)
         entry.logs.append(log)
         updated[key] = entry
         replaceDays(updated, action: "专注记录")
@@ -1337,6 +1340,94 @@ public final class JournalStore: ObservableObject {
         pendingSave = Task { [weak self] in
             do { try await Task.sleep(nanoseconds: 250_000_000) } catch { return }
             self?.save()
+        }
+    }
+}
+
+// MARK: - 标签改名、合并、删除
+
+extension JournalStore {
+    /// 把标签 `tag` 里属于 `old`（含它的子标签）的部分换成 `new`：`论文` → `研究` 时，`论文/方法` 变成 `研究/方法`；不相干的原样返回。
+    public static func renamedTag(_ tag: String, from old: String, to new: String) -> String {
+        let parts = tag.split(separator: "/").map(String.init)
+        let oldParts = old.split(separator: "/").map { TagText.key(String($0)) }
+        guard parts.count >= oldParts.count, zip(parts, oldParts).allSatisfy({ TagText.key($0) == $1 }) else { return tag }
+        return ([new] + parts.dropFirst(oldParts.count)).joined(separator: "/")
+    }
+
+    /// 这个标签或它的子标签。
+    public static func isTag(_ tag: String, under name: String) -> Bool {
+        let key = TagText.key(tag), root = TagText.key(name)
+        return key == root || key.hasPrefix(root + "/")
+    }
+
+    /// 改名：所有待办、日志（含快照里的任务标签）、草稿、注册表里的这个标签（连同子标签）都换成新名字。
+    /// 新名字已经存在就是**合并**：两边的内容汇到一起，重复的去掉。一次 ⌘Z 全部恢复（包括注册表）。返回新名字；不合法返回 nil。
+    @discardableResult
+    public func renameTag(_ old: String, to raw: String) -> String? {
+        guard !isReadOnly, let new = TagText.normalize(raw), allTags().contains(where: { $0.id == TagText.key(old) }) else { return nil }
+        guard new != old else { return new }
+        let map = { (tags: [String]) in TagText.merge([], tags.map { Self.renamedTag($0, from: old, to: new) }) }
+        var updated = days
+        for key in Array(updated.keys) {
+            var day = updated[key]!
+            for index in day.todos.indices { day.todos[index].tags = map(day.todos[index].tags) }
+            for index in day.logs.indices {
+                day.logs[index].tags = map(day.logs[index].tags)
+                day.logs[index].taskTags = map(day.logs[index].taskTags)
+            }
+            day.logDraftTags = map(day.logDraftTags)
+            updated[key] = day
+        }
+        applyTagChange(days: updated, registry: map(tagRegistry), action: "重命名标签")
+        return new
+    }
+
+    /// 删除标签（连同子标签）：从所有待办、日志、草稿、注册表里去掉，**内容本身都保留**。一次 ⌘Z 全部恢复。返回受影响的待办和日志条数。
+    @discardableResult
+    public func deleteTag(_ name: String) -> Int {
+        guard !isReadOnly, allTags().contains(where: { $0.id == TagText.key(name) }) else { return 0 }
+        let strip = { (tags: [String]) in tags.filter { !Self.isTag($0, under: name) } }
+        var updated = days
+        var touched = 0
+        for key in Array(updated.keys) {
+            var day = updated[key]!
+            for index in day.todos.indices where day.todos[index].tags.contains(where: { Self.isTag($0, under: name) }) {
+                day.todos[index].tags = strip(day.todos[index].tags)
+                touched += 1
+            }
+            for index in day.logs.indices {
+                let before = day.logs[index]
+                day.logs[index].tags = strip(before.tags)
+                day.logs[index].taskTags = strip(before.taskTags)
+                if day.logs[index].tags != before.tags { touched += 1 }
+            }
+            day.logDraftTags = strip(day.logDraftTags)
+            updated[key] = day
+        }
+        applyTagChange(days: updated, registry: strip(tagRegistry), action: "删除标签")
+        return touched
+    }
+
+    /// 数据和注册表一起改，作为一次撤销。
+    private func applyTagChange(days updated: [String: DayEntry], registry: [String], action: String) {
+        undoManager.beginUndoGrouping()
+        replaceDays(updated, action: action)
+        if registry != tagRegistry {
+            registerRegistryUndo(tagRegistry, action: action)
+            tagRegistry = registry
+            registryChanged()
+        }
+        undoManager.setActionName(action)
+        undoManager.endUndoGrouping()
+    }
+
+    private func registerRegistryUndo(_ previous: [String], action: String) {
+        undoManager.registerUndo(withTarget: self) { store in
+            let current = store.tagRegistry
+            store.tagRegistry = previous
+            store.registryChanged()
+            store.registerRegistryUndo(current, action: action)
         }
     }
 }

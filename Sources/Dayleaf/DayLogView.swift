@@ -6,23 +6,32 @@ import DayleafCore
 /// 它在独立窗口里，可以拖边缘调整大小；Esc、⌘J 或「完成」关闭。
 struct DayLogView: View {
     @ObservedObject var store: JournalStore
-    @State private var date: Date
+    @ObservedObject var day: DayLogDay
     @ObservedObject private var themes = ThemeStore.shared
+    @EnvironmentObject private var toast: ToastCenter
     let close: () -> Void
     let showMain: () -> Void
 
-    init(store: JournalStore, initialDate: Date, close: @escaping () -> Void, showMain: @escaping () -> Void = {}) {
+    init(store: JournalStore, day: DayLogDay, close: @escaping () -> Void, showMain: @escaping () -> Void = {}) {
         self.store = store
+        self.day = day
         self.close = close
         self.showMain = showMain
-        _date = State(initialValue: JournalDates.calendar.startOfDay(for: initialDate))
     }
 
+    /// 只显示一天、不做窗口的场景（测试、截图）。
+    init(store: JournalStore, initialDate: Date, close: @escaping () -> Void, showMain: @escaping () -> Void = {}) {
+        let day = DayLogDay()
+        day.date = JournalDates.calendar.startOfDay(for: initialDate)
+        self.init(store: store, day: day, close: close, showMain: showMain)
+    }
+
+    private var date: Date { day.date }
     private var isToday: Bool { JournalDates.calendar.isDateInToday(date) }
 
     private func shift(_ days: Int) {
         NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
-        date = JournalDates.calendar.date(byAdding: .day, value: days, to: date) ?? date
+        day.date = JournalDates.calendar.date(byAdding: .day, value: days, to: date) ?? date
     }
 
     var body: some View {
@@ -35,8 +44,12 @@ struct DayLogView: View {
         .id(themes.themeID + themes.appearance.rawValue)
         .background(Palette.background)
         .frame(minWidth: DayLogWindowController.minSize.width, maxWidth: .infinity, minHeight: DayLogWindowController.minSize.height, maxHeight: .infinity)
-        // 点日志里的任务标签会跳到主窗口里的那个任务：把主窗口调到前面，日志窗口留着。
-        .onReceive(NotificationCenter.default.publisher(for: .dayleafNavigate)) { _ in showMain() }
+        .overlay(alignment: .bottom) { ToastView(center: toast).padding(.bottom, 18) }
+        // 在这个窗口里删了日志：撤销提示出现在这里（主窗口那边不再弹）。
+        .onReceive(store.$lastAction.dropFirst()) { event in
+            guard let event, DayLogWindowController.shared.isKey, let message = ToastCenter.undoMessages[event.name] else { return }
+            toast.show(message, actionTitle: "撤销") { store.undo() }
+        }
     }
 
     private var header: some View {

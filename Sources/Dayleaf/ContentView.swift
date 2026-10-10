@@ -36,6 +36,7 @@ struct ContentView: View {
     @AppStorage(Prefs.clickExpands) private var clickExpands = true
     @AppStorage(Prefs.weekStartsSunday) private var weekStartsSunday = false
     @AppStorage(Prefs.uiScale) private var uiScale = 1.0
+    @Environment(\.focusSession) private var focus
     @ObservedObject private var themes = ThemeStore.shared
     @EnvironmentObject private var reminders: ReminderScheduler
     @EnvironmentObject private var interaction: WorkspaceInteraction
@@ -56,7 +57,7 @@ struct ContentView: View {
     }
 
     /// 带「撤销」提示的操作。普通编辑不打扰用户。
-    private static let toastMessages = ["删除任务": "已删除事项", "删除日志": "已删除日志", "移动任务": "已移动事项", "移到今天": "已把逾期事项的截止日期改到今天"]
+    private static var toastMessages: [String: String] { ToastCenter.undoMessages }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -129,7 +130,8 @@ struct ContentView: View {
         .onReceive(store.$days.debounce(for: .milliseconds(400), scheduler: RunLoop.main)) { _ in refreshOverview() }
         .onReceive(store.$lastAction.dropFirst()) { event in
             toast.dismiss()
-            guard let event, let message = Self.toastMessages[event.name] else { return }
+            // 只在主窗口是当前窗口时提示（在日志窗口里删的，提示出现在日志窗口）。
+            guard let event, AppRouter.mainIsKey(), let message = Self.toastMessages[event.name] else { return }
             toast.show(message, actionTitle: "撤销") { store.undo() }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
@@ -154,8 +156,37 @@ struct ContentView: View {
                          openDay: { date in select(date); dayLogWindow.show(store: store, date: date) })
     }
 
-    private func handle(_ command: AppCommand) {
+    /// 这些命令的结果在主窗口里（清单、日历、搜索面板……）：主窗口被收起了就先把它调出来，不然点了什么都看不到。
+    private static func needsMainWindow(_ command: AppCommand) -> Bool {
         switch command {
+        case .newTodo, .search, .agenda, .reveal, .backups, .export, .rollover, .toggleTasks, .shiftMonth, .today, .shiftDay,
+             .selectAdjacent, .toggleSelected, .editSelected, .deleteSelected, .deadlineSelected, .tagsSelected:
+            return true
+        default: return false
+        }
+    }
+
+    private func handle(_ command: AppCommand) {
+        if Self.needsMainWindow(command) { AppRouter.presentMain() }
+        switch command {
+        case .deadlineSelected, .tagsSelected:
+            guard let task = selectedTask else { return }
+            tasksVisible = true
+            scrollTarget = task.id
+            let kind: TaskPopoverRequest.Kind = { if case .tagsSelected = command { return .tags } else { return .details } }()
+            // 等清单滚到这一行、行画出来之后再请它打开面板。
+            DispatchQueue.main.async { interaction.taskPopover = TaskPopoverRequest(id: task.id, kind: kind) }
+        case .pinSelected:
+            guard let task = selectedTask, !task.task.completed else { return }
+            store.pinTask(store.pinnedTask?.id == task.id ? nil : task.id)
+        case .dropSelected:
+            guard let task = selectedTask, !task.task.isDone else { return }
+            store.dropTodo(task.id, on: task.date)
+        case .focusSelected:
+            guard let task = selectedTask, !task.task.completed, let focus else { return }
+            if focus.active?.taskID == task.id { focus.stop(reason: "手动结束") } else { focus.start(task: task, url: FocusSession.link(in: task.task.title)) }
+        case .notesSelected:
+            showNotes(tag: nil)
         case .newTodo:
             tasksVisible = true
             interaction.activePane = .tasks
@@ -203,7 +234,8 @@ struct ContentView: View {
         case .reveal(let id): reveal(date: store.locate(id)?.task.dueDate, taskID: id)
         case .export: exportJournal()
         case .backups: showingBackups = true
-        case .settings, .quickCapture: break
+        case .settings: AppRouter.showSettings()
+        case .quickCapture: AppRouter.showQuickCapture()
         }
     }
 
@@ -212,8 +244,10 @@ struct ContentView: View {
     private func sameDay(_ a: Date, _ b: Date) -> Bool { JournalDates.calendar.isDate(a, inSameDayAs: b) }
 
     private func reveal(date: Date?, taskID: UUID?) {
-        if let date { select(date) }
+        AppRouter.presentMain()
+        if let date { select(date) } else if taskID != nil { tasksVisible = true }
         interaction.selectedTaskID = taskID
+        if let taskID { scrollTarget = taskID }
     }
 
     private func moveSelection(_ amount: Int) {
@@ -470,6 +504,10 @@ struct ContentView: View {
                     .onChange(of: scrollTarget) { id in
                         if let id { withAnimation(Motion.quick) { proxy.scrollTo(id, anchor: .center) }; scrollTarget = nil }
                     }
+                    .onChange(of: selectedDate) { date in
+                        // 日志窗口开着：跟着主窗口换到同一天。
+                        if dayLogWindow.isVisible { dayLogWindow.setDate(date) }
+                    }
                     .onChange(of: scrollGroup) { id in
                         if let id { withAnimation(Motion.quick) { proxy.scrollTo("group-" + id, anchor: .top) }; scrollGroup = nil }
                     }
@@ -582,7 +620,7 @@ struct ContentView: View {
                 Button { agenda = .all } label: { Image(systemName: "magnifyingglass") }
                     .buttonStyle(HitAreaButtonStyle()).help("搜索 · ⌘F").accessibilityLabel("搜索")
                 Button { commands.send(.notes) } label: { Image(systemName: "note.text") }
-                    .buttonStyle(HitAreaButtonStyle()).help("笔记 · ⇧⌘N").accessibilityLabel("笔记")
+                    .buttonStyle(HitAreaButtonStyle()).help("笔记 · ⌘N（选中了待办就打开它的笔记）").accessibilityLabel("笔记")
                 navigationButton("chevron.left", help: "上个月") { shiftMonth(-1) }
                 navigationButton("chevron.right", help: "下个月") { shiftMonth(1) }
                 optionsMenu

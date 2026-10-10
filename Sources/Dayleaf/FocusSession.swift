@@ -43,6 +43,7 @@ final class FocusSession: ObservableObject {
     var activateExistingTab: (URL) async -> Bool = { await FocusProbe.activateExistingTab(for: $0) }
 
     private var timer: Timer?
+    private var storeSink: AnyCancellable?
     private var awayStreak = 0
     private var baseline: Baseline?
     private var checking = false
@@ -90,6 +91,10 @@ final class FocusSession: ObservableObject {
         baseline = url.map(Self.baseline(for:))
         active?.startLogID = store.addFocusLog("▶ 开始专注", taskID: task.id, now: now)
         store.setFocusTask(task.id)
+        // 任务一完成、放弃或删除就立刻结束（不等下一秒的计时）。
+        storeSink = store.$days.dropFirst().sink { [weak self] _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated { _ = self?.stopIfTaskClosed() } }
+        }
         // 已经开着就切过去，不要再打开一次，否则会回到页面开头。没有链接就没有页面可开。
         if let url {
             Task { @MainActor in
@@ -108,6 +113,7 @@ final class FocusSession: ObservableObject {
         guard let session = active else { return }
         timer?.invalidate()
         timer = nil
+        storeSink = nil
         let seconds = max(0, now.timeIntervalSince(session.started))
         if seconds < minLoggedSeconds() {
             // 太短：不留日志（撤掉开始那条、不写结束那条），时间照常累加。
@@ -115,7 +121,7 @@ final class FocusSession: ObservableObject {
         } else {
             let total = (store?.locate(session.taskID)?.task.focusSeconds ?? 0) + seconds
             store?.addFocusLog("■ 结束专注 · 用时 \(Self.duration(seconds)) · 累计 \(Self.duration(total)) · \(reason)",
-                               taskID: session.taskID, now: now, seconds: seconds)
+                               taskID: session.taskID, now: now, seconds: seconds, fallback: (session.title, session.number))
         }
         store?.setFocusTask(nil)
         active = nil
@@ -149,8 +155,19 @@ final class FocusSession: ObservableObject {
 
     // MARK: - 检测
 
+    /// 专注的任务被完成、放弃或删除了：计时没有意义了，自动结束并写明原因。返回是否结束了。
+    @discardableResult
+    func stopIfTaskClosed(now: Date = Date()) -> Bool {
+        guard let session = active, let store else { return false }
+        guard let task = store.locate(session.taskID)?.task else { stop(reason: "任务已删除", now: now); return true }
+        if task.isDropped { stop(reason: "任务已放弃", now: now); return true }
+        if task.isDone { stop(reason: "任务已完成", now: now); return true }
+        return false
+    }
+
     private func tick() {
         guard let session = active else { return }
+        if stopIfTaskClosed() { return }
         elapsed = Date().timeIntervalSince(session.started)
         // 没有链接：只计时，不检测窗口，也就不会因为「离开」而自动结束，只能手动结束。
         guard let target = session.url else { return }

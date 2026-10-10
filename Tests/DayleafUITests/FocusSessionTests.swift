@@ -85,6 +85,34 @@ final class FocusSessionTests: XCTestCase {
         XCTAssertEqual(launched.map(\.host), ["arxiv.org"], "没开着才打开")
     }
 
+    /// 专注的任务被完成、放弃或删除：计时立刻结束，写明原因，不再往已关闭的任务上累加。
+    func testClosingTheFocusedTaskStopsTheTimerWithAReason() async throws {
+        for (close, reason) in [("完成", "任务已完成"), ("放弃", "任务已放弃"), ("删除", "任务已删除")] {
+            let (session, store, task) = try makeSession()
+            let start = JournalDates.calendar.date(bySettingHour: 12, minute: 0, second: 0, of: Date())!
+            session.start(task: task, url: try XCTUnwrap(FocusSession.link(in: task.task.title)), now: start)
+            switch close {
+            case "完成": store.toggleTodo(task.id, on: task.date)
+            case "放弃": store.dropTodo(task.id, on: task.date)
+            default: store.deleteTodo(task.id, on: task.date)
+            }
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            XCTAssertNil(session.active, "\(close)后专注自动结束")
+            XCTAssertNil(store.focusTaskID)
+            let last = store.allLogs(includeFocus: true).last?.log.text ?? ""
+            XCTAssertTrue(last.contains(reason), "结束原因写明了：\(last)")
+        }
+    }
+
+    func testEditingTheFocusedTaskDoesNotStopTheTimer() async throws {
+        let (session, store, task) = try makeSession()
+        session.start(task: task, url: try XCTUnwrap(FocusSession.link(in: task.task.title)))
+        store.renameTodo(task.id, title: "改了名字 [课程](https://v.example.edu/play-center)", on: task.date)
+        try? await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertNotNil(session.active, "只是改名、加标签不会结束")
+        session.stop(reason: "手动结束")
+    }
+
     /// 没有链接的待办：和有链接的一样能专注计时，只是不打开页面、不检测窗口。
     func testTaskWithoutALinkCanFocusButOpensNothingAndNeverAutoStops() async throws {
         let (session, store, _) = try makeSession()

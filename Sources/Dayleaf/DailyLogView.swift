@@ -602,9 +602,8 @@ private struct DailyLogRow: View {
     let preview: (Int) -> Void
     @State private var expanded = false
     @EnvironmentObject private var interaction: WorkspaceInteraction
-    @State private var editing = false
-    @State private var editText = ""
-    @State private var focused = false
+    /// 这条日志的标签面板。
+    @State private var editingTags = false
     @State private var hovered = false
 
     private var color: Color {
@@ -645,9 +644,10 @@ private struct DailyLogRow: View {
                 .help("\(log.kind.title) · \(log.createdAt.formatted(date: .abbreviated, time: .standard))")
             if let label = LogTaskLabel.saved(log, store: store, logDate: date) {
                 Button {
-                    if let id = log.taskID, let task = store.locate(id) {
-                        interaction.selectedTaskID = id
-                        if let due = task.task.dueDate { NotificationCenter.default.post(name: .dayleafNavigate, object: due) }
+                    // 不论有没有截止日期，都把主窗口调出来并选中这个任务。
+                    if let id = log.taskID, store.locate(id) != nil {
+                        AppRouter.presentMain()
+                        NotificationCenter.default.post(name: .dayleafReveal, object: id)
                     }
                 } label: {
                     Text("[\(label)]").font(.system(size: UIScale.pt(11), design: .monospaced)).lineLimit(1)
@@ -660,12 +660,7 @@ private struct DailyLogRow: View {
                 .disabled(log.taskID.flatMap { store.locate($0) } == nil)
             }
             Group {
-                if editing {
-                    TaskInput(text: $editText, focused: $focused, fontSize: 12,
-                              submit: { finishEditing(); next() }, cancel: finishEditing, monospaced: true)
-                        .frame(height: 20).onAppear { focused = true }
-                        .onChange(of: focused) { if !$0, !LinkInsertion.presenting { finishEditing() } }
-                } else if log.text.isEmpty, !log.images.isEmpty {
+                if log.text.isEmpty, !log.images.isEmpty {
                     Button(action: toggleImages) {
                         Text(expanded ? "收起图片" : "图片 · 点击查看")
                             .font(.system(size: UIScale.pt(12), design: .monospaced)).foregroundStyle(TerminalPalette.muted)
@@ -673,7 +668,7 @@ private struct DailyLogRow: View {
                     }.buttonStyle(.plain)
                 } else {
                     TaskLinkText(source: log.text, completed: false, color: TerminalPalette.text, fontSize: 12,
-                                 edit: startEditing, open: SafariLinks.open,
+                                 edit: { guard !store.isReadOnly else { return }; edit(log, date) }, open: SafariLinks.open,
                                  maxLines: 0, monospaced: true, compactLines: true,
                                  click: log.images.isEmpty ? nil : toggleImages, menuItems: menuItems)
                 }
@@ -710,8 +705,7 @@ private struct DailyLogRow: View {
                 }
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: .dayleafCommitEditing)) { _ in finishEditing() }
-        .onDisappear { finishEditing() }
+        .popover(isPresented: $editingTags, arrowEdge: .trailing) { LogBatchTagView(store: store, logIDs: [log.id]) }
     }
 
     /// 右键菜单（和浮出的按钮是同一批操作，另外有删除）。
@@ -722,6 +716,10 @@ private struct DailyLogRow: View {
         return [
             TextMenuItem(title: "复制文字（不含图片）", symbol: "doc.on.doc", action: { copy(log) }),
             TextMenuItem(title: "编辑", symbol: "pencil", action: { edit(log, date) }),
+            TextMenuItem(title: log.tags.isEmpty ? "加标签…" : "标签…", symbol: "tag", action: { editingTags = true }),
+        ] + (log.taskID.flatMap { store.locate($0) }.map { task in
+            [TextMenuItem(title: "打开「\(FocusHint.label(task))」的笔记", symbol: "note.text", action: { AppRouter.openNotes(task.id) })]
+        } ?? []) + [
             TextMenuItem(title: selection.selected ? "取消选中" : "选中（可批量加标签、关联待办）", symbol: selection.selected ? "checkmark.circle" : "circle", action: selection.toggle),
             .divider,
             TextMenuItem(title: "删除（可撤销）", symbol: "trash", destructive: true, action: delete),
@@ -731,8 +729,8 @@ private struct DailyLogRow: View {
     /// 悬停时才出现的小胶囊：复制、编辑，加上选择圈；已经选了几条之后，选择圈常驻，方便继续点选。
     @ViewBuilder
     private var floatingActions: some View {
-        let showsButtons = (hovered || editing) && !store.isReadOnly
-        let showsSelect = hovered || editing || selection.selected || selection.anySelected
+        let showsButtons = hovered && !store.isReadOnly
+        let showsSelect = hovered || selection.selected || selection.anySelected
         if showsButtons || showsSelect {
             HStack(spacing: 0) {
                 if showsButtons {
@@ -765,23 +763,8 @@ private struct DailyLogRow: View {
         }
     }
 
-    private func startEditing() {
-        interaction.activePane = .summary
-        guard !store.isReadOnly else { return }
-        NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
-        editText = log.text
-        editing = true
-    }
-
-    private func finishEditing() {
-        guard editing else { return }
-        editing = false
-        store.updateLog(log.id, text: editText, on: date)
-    }
-
     private func delete() {
         guard !store.isReadOnly else { return }
-        finishEditing()
         store.deleteLog(log.id, on: date)
     }
 }

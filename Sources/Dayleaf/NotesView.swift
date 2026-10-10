@@ -22,6 +22,14 @@ struct NotesView: View {
     @State private var noteEditFocused = false
     @State private var focused = false
     @State private var error: String?
+    /// 标签的右键操作：改名 / 合并、删除（内容保留）。
+    @State private var renamingTag: String?
+    @State private var renameText = ""
+    @State private var renameMessage: String?
+    @State private var deletingTag: String?
+    /// 任务标题栏的标签面板；笔记行的标签面板（记哪一条）。
+    @State private var editingTopicTags = false
+    @State private var taggingNoteID: UUID?
     /// 标签页输入框里的 `@` 补全。
     @StateObject private var tagMention = MentionState()
     /// 任务页输入框里的 `#`（任务页的日志固定属于这个任务，只能选标签）。
@@ -95,6 +103,18 @@ struct NotesView: View {
         .frame(minWidth: 640, minHeight: 420)
         .background(Palette.background)
         .foregroundStyle(Palette.ink)
+        .alert("删除标签 #\(deletingTag ?? "")？", isPresented: Binding(get: { deletingTag != nil }, set: { if !$0 { deletingTag = nil } })) {
+            Button("删除", role: .destructive) {
+                guard let name = deletingTag else { return }
+                let count = store.deleteTag(name)
+                if tagSelection.map({ JournalStore.isTag($0, under: name) }) == true { tagSelection = nil; nav.validate(in: store) }
+                error = "已从 \(count) 个待办和日志上去掉 #\(name)，内容都保留 · ⌘Z 撤销"
+                deletingTag = nil
+            }
+            Button("取消", role: .cancel) { deletingTag = nil }
+        } message: {
+            Text("只去掉这个标签（连同子标签），待办和笔记本身都保留。可以 ⌘Z 撤销。")
+        }
         .onAppear {
             nav.validate(in: store)
             configureMention()
@@ -254,14 +274,47 @@ struct NotesView: View {
         .buttonStyle(.plain)
         .accessibilityLabel("标签 \(summary.name)，\(summary.taskCount) 个待办，\(summary.noteCount) 条笔记")
         .contextMenu {
+            Button("重命名 / 合并…") { renameText = summary.name; renameMessage = nil; renamingTag = summary.name }
             if summary.taskCount == 0 && summary.noteCount == 0 {
                 Button("删除这个空标签", role: .destructive) {
                     if store.removeEmptyTag(summary.name), tagSelection.map({ TagText.key($0) == summary.id }) == true { tagSelection = nil }
                 }
             } else {
-                Text("正在使用的标签不能删除")
+                Button("删除标签（内容保留）…", role: .destructive) { deletingTag = summary.name }
             }
         }
+        .popover(isPresented: Binding(get: { renamingTag == summary.name }, set: { if !$0 { renamingTag = nil } }), arrowEdge: .trailing) {
+            renamePopover(summary.name)
+        }
+    }
+
+    /// 改名：子标签跟着改；新名字已经存在就是合并。
+    private func renamePopover(_ old: String) -> some View {
+        let target = TagText.normalize(renameText)
+        let merging = target.map { name in TagText.key(name) != TagText.key(old) && store.allTags().contains { $0.id == TagText.key(name) } } ?? false
+        return VStack(alignment: .leading, spacing: 10) {
+            Text("重命名 #\(old)").font(.headline)
+            TextField("新名字", text: $renameText).textFieldStyle(.roundedBorder).onSubmit { commitRename(old) }
+            if let renameMessage { Text(renameMessage).font(.caption).foregroundStyle(.orange) }
+            Text(merging ? "#\(target ?? "") 已经存在：会把两个标签合并，内容汇到一起。" : "所有待办、日志里的 #\(old)（包括它的子标签）都会改成新名字。可以 ⌘Z 撤销。")
+                .font(.caption).foregroundStyle(merging ? Palette.accent : .secondary).fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("取消") { renamingTag = nil }.keyboardShortcut(.cancelAction)
+                Button(merging ? "合并" : "重命名") { commitRename(old) }.keyboardShortcut(.defaultAction).buttonStyle(.borderedProminent)
+                    .disabled(target == nil || target == old)
+            }
+        }.padding(16).frame(width: 320)
+    }
+
+    private func commitRename(_ old: String) {
+        guard let name = store.renameTag(old, to: renameText) else {
+            renameMessage = "标签不能为空、含空格，或是纯数字"
+            return
+        }
+        renamingTag = nil
+        if tagSelection.map({ JournalStore.isTag($0, under: old) }) == true { select(tag: JournalStore.renamedTag(tagSelection!, from: old, to: name)) }
+        error = "已重命名为 #\(name) · ⌘Z 撤销"
     }
 
     private func topicRow(_ topic: JournalStore.NoteTopic) -> some View {
@@ -356,6 +409,22 @@ struct NotesView: View {
                 }
             }
             Spacer()
+            if let task = store.locate(topic.id), !store.isReadOnly {
+                // 和清单里的扇形菜单一致：完成、放弃、标签都能在笔记里直接做。
+                Button { store.toggleTodo(task.id, on: task.date) } label: {
+                    Label(task.task.isDone ? "取消完成" : "完成", systemImage: task.task.isDone ? "arrow.uturn.backward.circle" : "checkmark.circle")
+                }
+                .disabled(task.task.isDropped).help(task.task.isDone ? "标记为未完成" : "标记为已完成 · ⌘Z 撤销")
+                if !task.task.isDone {
+                    Button { store.dropTodo(task.id, on: task.date) } label: {
+                        Label(task.task.isDropped ? "恢复" : "放弃", systemImage: task.task.isDropped ? "arrow.uturn.backward.circle" : "nosign")
+                    }
+                    .help(task.task.isDropped ? "恢复成未完成" : "不用做了，但留着记录（笔记都在） · ⌘Z 撤销")
+                }
+                Button { editingTopicTags = true } label: { Label("标签", systemImage: task.task.tags.isEmpty ? "tag" : "tag.fill") }
+                    .help("给这个待办加、去标签")
+                    .popover(isPresented: $editingTopicTags, arrowEdge: .bottom) { TagPickerView(store: store, task: task.task) }
+            }
             if !topic.deleted, !topic.completed {
                 let pinned = store.pinnedTask?.id == topic.id
                 Button { store.pinTask(pinned ? nil : topic.id) } label: {
@@ -439,6 +508,10 @@ struct NotesView: View {
                     .disabled(log.copyText == nil)
                 if !store.isReadOnly {
                     noteAction("pencil", "编辑这条笔记") { beginNoteEdit(log) }
+                    noteAction(log.tags.isEmpty ? "tag" : "tag.fill", "这条笔记的标签") { taggingNoteID = log.id }
+                        .popover(isPresented: Binding(get: { taggingNoteID == log.id }, set: { if !$0 { taggingNoteID = nil } }), arrowEdge: .leading) {
+                            LogBatchTagView(store: store, logIDs: [log.id])
+                        }
                     LinkPickerButton(store: store, current: log.taskID, pick: { store.setLogTask($0, forLog: log.id, on: item.date) }) {
                         Image(systemName: "link").font(.system(size: 11)).frame(width: 24, height: 22).contentShape(Rectangle())
                     }

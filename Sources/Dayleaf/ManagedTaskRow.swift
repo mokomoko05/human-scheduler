@@ -114,6 +114,16 @@ struct ManagedTaskRow: View {
             }
         }
         .popover(isPresented: $showingDetails, arrowEdge: .leading) { TaskDetailsView(store: store, task: task, date: date) }
+        // 键盘（D / T）或菜单请这一行打开面板。
+        .onChange(of: interaction.taskPopover) { request in
+            guard let request, request.id == task.id else { return }
+            interaction.taskPopover = nil
+            NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+            switch request.kind {
+            case .details: showingDetails = true
+            case .tags: showingTags = true
+            }
+        }
         .disabled(store.isReadOnly)
     }
 
