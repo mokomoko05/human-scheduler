@@ -80,7 +80,8 @@ final class NotesNavigation: ObservableObject {
     /// 上次停留的任务被删除、或标签不存在了，就退回到最近有笔记的任务；停留的位置还有效就原样保留。
     func validate(in store: JournalStore) {
         if let tag = tagSelection, !store.allTags().contains(where: { $0.id == TagText.key(tag) }) { tagSelection = nil }
-        if let id = selection, !store.noteTopics().contains(where: { $0.id == id }) { selection = nil }
+        // 选中的任务还在（哪怕还没有笔记）就保留，否则退回最近有笔记的任务。
+        if let id = selection, store.noteTopic(for: id) == nil { selection = nil }
         if selection == nil, tagSelection == nil { selection = store.noteTopics().first?.id }
     }
 }

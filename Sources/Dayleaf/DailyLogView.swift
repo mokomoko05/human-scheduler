@@ -47,7 +47,6 @@ struct DailyLogView: View {
     @State private var historyIndex: Int?
     @State private var pendingDraft = ""
     @State private var pendingTaskID: UUID?
-    @State private var previewing: ImagePreviewItem?
     @State private var editingLogID: UUID?
     @State private var editingLogDate = Date()
     @State private var showingFilter = false
@@ -94,7 +93,6 @@ struct DailyLogView: View {
         .sheet(isPresented: $preparingReview) {
             ReviewDraftView(store: store, date: date)
         }
-        .sheet(item: $previewing) { ImagePreviewSheet(store: store, item: $0) }
     }
 
     /// 左侧：日志流与输入。
@@ -378,7 +376,7 @@ struct DailyLogView: View {
                         DailyLogRow(store: store, date: item.date, log: item.log, highlighted: editingLogID == item.log.id, next: { focused = true },
                                     selection: selectionState(item.log.id), copy: { copyLogs([$0.id]) },
                                     edit: { beginLogEdit($0, on: $1) },
-                                    preview: { previewing = ImagePreviewItem(names: item.log.images, index: $0) })
+                                    preview: { ImageViewerController.shared.show(store: store, around: item.log, index: $0) })
                     }
                 }
             }.padding(.horizontal, 4).padding(.vertical, 5)
@@ -395,7 +393,7 @@ struct DailyLogView: View {
                             DailyLogRow(store: store, date: date, log: log, highlighted: editingLogID == log.id, next: { focused = true },
                                         selection: selectionState(log.id), copy: { copyLogs([$0.id]) },
                                         edit: { beginLogEdit($0, on: $1) },
-                                        preview: { previewing = ImagePreviewItem(names: log.images, index: $0) })
+                                        preview: { ImageViewerController.shared.show(store: store, around: log, index: $0) })
                         }
                         Color.clear.frame(height: 1).id("tail")
                     }
@@ -428,7 +426,7 @@ struct DailyLogView: View {
             if !entry.logDraftImages.isEmpty {
                 PendingImagesStrip(store: store, names: entry.logDraftImages,
                                    remove: { store.removeDraftImage($0, on: date) },
-                                   preview: { previewing = ImagePreviewItem(names: entry.logDraftImages, index: $0) })
+                                   preview: { ImageViewerController.shared.show(store: store, names: entry.logDraftImages, index: $0) })
             }
             if let selected = entry.logTaskID {
                 HStack(spacing: 4) {

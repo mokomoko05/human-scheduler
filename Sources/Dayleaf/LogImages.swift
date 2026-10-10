@@ -2,12 +2,6 @@ import AppKit
 import SwiftUI
 import DayleafCore
 
-struct ImagePreviewItem: Identifiable {
-    let id = UUID()
-    let names: [String]
-    var index: Int
-}
-
 /// 缩略图方块；文件缺失时显示占位。
 struct ImageThumb: View {
     let url: URL
@@ -101,45 +95,6 @@ struct LogImageGallery: View {
 }
 
 /// 大图预览：← → 切换，Esc 关闭，可在「预览」中打开或复制。
-struct ImagePreviewSheet: View {
-    let store: JournalStore
-    @State var item: ImagePreviewItem
-    @Environment(\.dismiss) private var dismiss
-
-    private var url: URL { store.imageURL(item.names[item.index]) }
-
-    var body: some View {
-        VStack(spacing: 12) {
-            ZStack {
-                Color.black
-                if let image = NSImage(contentsOf: url) {
-                    Image(nsImage: image).resizable().scaledToFit().padding(8)
-                } else {
-                    Label("找不到这张图片的文件", systemImage: "photo.badge.exclamationmark").foregroundStyle(.secondary)
-                }
-            }
-            .clipShape(RoundedRectangle(cornerRadius: 8))
-            HStack(spacing: 10) {
-                Button { item.index = max(0, item.index - 1) } label: { Image(systemName: "chevron.left") }
-                    .keyboardShortcut(.leftArrow, modifiers: []).disabled(item.index == 0).accessibilityLabel("上一张")
-                Text("\(item.index + 1) / \(item.names.count)").font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary)
-                Button { item.index = min(item.names.count - 1, item.index + 1) } label: { Image(systemName: "chevron.right") }
-                    .keyboardShortcut(.rightArrow, modifiers: []).disabled(item.index >= item.names.count - 1).accessibilityLabel("下一张")
-                Spacer()
-                Button("复制图片") {
-                    if let image = NSImage(contentsOf: url) {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.writeObjects([image])
-                    }
-                }
-                Button("在「预览」中打开") { NSWorkspace.shared.open(url) }
-                Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
-            }
-        }
-        .padding(16).frame(minWidth: 720, minHeight: 520)
-    }
-}
-
 /// 选择要筛选的任务：当天清单里的任务，以及所有被日志关联过的任务。
 struct LogFilterPopover: View {
     @ObservedObject var store: JournalStore

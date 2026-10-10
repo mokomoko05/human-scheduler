@@ -20,7 +20,6 @@ struct NotesView: View {
     @State private var editingNoteID: UUID?
     @State private var noteEditText = ""
     @State private var noteEditFocused = false
-    @State private var previewing: ImagePreviewItem?
     @State private var focused = false
     @State private var error: String?
     /// 标签页输入框里的 `@` 补全。
@@ -64,7 +63,9 @@ struct NotesView: View {
     private var plainQuery: String { query.hasPrefix("#") ? String(query.drop(while: { $0 == "#" })) : query }
 
     private var topics: [JournalStore.NoteTopic] {
-        let all = store.noteTopics()
+        var all = store.noteTopics()
+        // 从清单打开的任务还没有笔记：也放进列表最上面，让它是选中的那一项。
+        if let id = selection, !all.contains(where: { $0.id == id }), let empty = store.noteTopic(for: id) { all.insert(empty, at: 0) }
         guard !query.isEmpty else { return all }
         if let tag = tagQuery { return all.filter { $0.tags.contains { TagText.matches($0, query: tag) } } }
         return all.filter {
@@ -94,7 +95,6 @@ struct NotesView: View {
         .frame(minWidth: 640, minHeight: 420)
         .background(Palette.background)
         .foregroundStyle(Palette.ink)
-        .sheet(item: $previewing) { ImagePreviewSheet(store: store, item: $0) }
         .onAppear {
             nav.validate(in: store)
             configureMention()
@@ -275,11 +275,11 @@ struct NotesView: View {
                     if topic.dropped { Image(systemName: "xmark.circle.fill").font(.system(size: 11)).foregroundStyle(Palette.muted) } else if topic.completed { Image(systemName: "checkmark.circle.fill").font(.system(size: 11)).foregroundStyle(Palette.success) }
                 }
                 HStack(spacing: 8) {
-                    Text("\(topic.count) 条").monospacedDigit()
+                    Text(topic.count == 0 ? "还没有笔记" : "\(topic.count) 条").monospacedDigit()
                     if topic.imageCount > 0 { Label("\(topic.imageCount)", systemImage: "photo") }
                     if topic.deleted { Text("任务已删除") }
                     Spacer(minLength: 4)
-                    Text(topic.lastActivity.relativeLabel)
+                    if topic.count > 0 { Text(topic.lastActivity.relativeLabel) }
                 }
                 .font(.system(size: 11)).foregroundStyle(Palette.muted)
             }
@@ -298,7 +298,7 @@ struct NotesView: View {
     private var detail: some View {
         if let tag = tagSelection {
             tagDetail(tag)
-        } else if let id = selection, let topic = store.noteTopics().first(where: { $0.id == id }) {
+        } else if let id = selection, let topic = store.noteTopic(for: id) {
             let notes = store.notes(for: id)
             VStack(spacing: 0) {
                 header(topic, notes: notes)
@@ -400,7 +400,7 @@ struct NotesView: View {
                 .foregroundStyle(kindColor(log.kind)).padding(.top, 1)
             VStack(alignment: .leading, spacing: 6) {
                 if showTask, let label = Self.sourceLabel(log) {
-                    Button { if let id = log.taskID, store.noteTopics().contains(where: { $0.id == id }) { select(task: id) } } label: {
+                    Button { if let id = log.taskID, store.noteTopic(for: id) != nil { select(task: id) } } label: {
                         Text(label).font(.system(size: 11)).lineLimit(1)
                             .padding(.horizontal, 6).padding(.vertical, 1)
                             .background(Palette.soft, in: RoundedRectangle(cornerRadius: 4))
@@ -425,9 +425,9 @@ struct NotesView: View {
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             ForEach(Array(log.images.enumerated()), id: \.element) { index, name in
-                                Button { previewing = ImagePreviewItem(names: log.images, index: index) } label: {
+                                Button { ImageViewerController.shared.show(store: store, around: log, index: index) } label: {
                                     ImageFit(url: store.imageURL(name), maxWidth: 440, maxHeight: 280)
-                                }.buttonStyle(.plain).help("点击查看大图")
+                                }.buttonStyle(.plain).help("点击查看大图；同一个任务的笔记里的图片可以 ← → 切换")
                             }
                         }
                     }
@@ -607,7 +607,7 @@ struct NotesView: View {
     }
 
     private func chapterHeader(_ tag: String, _ chapter: NotebookChapter, folded: Bool) -> some View {
-        let canOpen = chapter.taskID.map { id in store.noteTopics().contains { $0.id == id } } ?? false
+        let canOpen = chapter.taskID.map { id in store.noteTopic(for: id) != nil } ?? false
         return HStack(spacing: 6) {
             Button { nav.setCollapsed(!folded, tag: tag, chapter: chapter.id) } label: {
                 Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
@@ -680,7 +680,7 @@ struct NotesView: View {
             if !pending.isEmpty {
                 PendingImagesStrip(store: store, names: pending,
                                    remove: { name in removeImage(name, from: key) },
-                                   preview: { previewing = ImagePreviewItem(names: pending, index: $0) })
+                                   preview: { ImageViewerController.shared.show(store: store, names: pending, index: $0) })
             }
             MentionList(state: tagMention, store: store, contextTags: [tag])
             HStack(spacing: 8) {
@@ -750,7 +750,7 @@ struct NotesView: View {
             if !pending.isEmpty {
                 PendingImagesStrip(store: store, names: pending,
                                    remove: { name in removeImage(name, from: key) },
-                                   preview: { previewing = ImagePreviewItem(names: pending, index: $0) })
+                                   preview: { ImageViewerController.shared.show(store: store, names: pending, index: $0) })
             }
             MentionList(state: taskMention, store: store)
             HStack(spacing: 8) {

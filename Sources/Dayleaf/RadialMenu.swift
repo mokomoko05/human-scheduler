@@ -16,15 +16,15 @@ struct RadialItem: Identifiable {
 /// 环形菜单的几何：以「三点」按钮为圆心，向左展开成一段扇形环（按钮在行的最右边，右边是拖动把手，所以不向右展开）。
 /// 角度是数学角度：0 = 右，90 = 上，180 = 左。
 enum RadialLayout {
-    static let radius: CGFloat = 50
+    static let radius: CGFloat = 58
     static let itemSize: CGFloat = 32
     static let hubRadius: CGFloat = 14
-    static let fanStart = 100.0
-    static let fanEnd = 260.0
+    static let fanStart = 92.0
+    static let fanEnd = 268.0
 
     /// 浮层大小，以及圆心在浮层里的位置（从左上角算）。
-    static let panelSize = NSSize(width: 136, height: 170)
-    static let hub = CGPoint(x: 116, y: 100)
+    static let panelSize = NSSize(width: 150, height: 190)
+    static let hub = CGPoint(x: 128, y: 110)
 
     static func angles(count: Int) -> [Double] {
         guard count > 1 else { return count == 1 ? [180] : [] }

@@ -37,6 +37,18 @@ enum UIScale {
     static func pt(_ value: CGFloat) -> CGFloat { value * factor }
 }
 
+private struct AppCommandsKey: EnvironmentKey {
+    static let defaultValue: CommandCenter? = nil
+}
+
+extension EnvironmentValues {
+    /// 视图里可选地拿到命令中心（不像 @EnvironmentObject 那样缺了就崩溃，搜索面板等地方可以没有）。
+    var appCommands: CommandCenter? {
+        get { self[AppCommandsKey.self] }
+        set { self[AppCommandsKey.self] = newValue }
+    }
+}
+
 /// 菜单栏、键盘和通知发给主界面的命令。
 enum AppCommand {
     case newTodo, newLog, insertLink, today, search
@@ -48,6 +60,8 @@ enum AppCommand {
     case export, backups, settings, quickCapture, notes, toggleNotes
     /// 全局快捷键触发：`appWasActive` 为 false 表示按键时 Scheduler 在后台，此时只把笔记调到最前面。
     case notesHotKey(appWasActive: Bool)
+    /// 打开某个任务的笔记（扇形菜单、右键菜单）。
+    case notesForTask(UUID)
 }
 
 @MainActor

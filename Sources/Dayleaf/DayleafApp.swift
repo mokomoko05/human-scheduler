@@ -77,7 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         settings = SettingsWindowController(loginItem: loginItem, failedHotKeys: { [weak self] in self?.failedHotKeys })
         // 切到别的应用就把工作窗口收起来；快速面板和专注计时窗口不在其中。
         autoHide = AutoHideOnResign(windows: { [weak self] in
-            [self?.window, NotesWindowController.shared.window, DayLogWindowController.shared.window, self?.settings.window]
+            [self?.window, NotesWindowController.shared.window, DayLogWindowController.shared.window, ImageViewerController.shared.window, self?.settings.window]
         }, extraHide: { [weak self] in self?.shell.hideForAppDeactivation() })
         shell.handoffWindow = { [unowned self] in otherWindowForHandoff(excluding: nil) }
         NotesWindowController.shared.handoffWindow = { [unowned self] in otherWindowForHandoff(excluding: NotesWindowController.shared.window) }
@@ -108,7 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.delegate = self
         window.contentView = NSHostingView(rootView: ContentView(store: store, loginItem: loginItem)
             .environmentObject(reminders).environmentObject(interaction)
-            .environmentObject(commands).environmentObject(toast).environment(\.focusSession, focus))
+            .environmentObject(commands).environmentObject(toast).environment(\.focusSession, focus).environment(\.appCommands, commands))
         window.center()
         window.setFrameAutosaveName("DayleafMainWindow")
         window.makeKeyAndOrderFront(nil)
@@ -516,7 +516,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         mainMenu.addItem(editItem)
 
         let terminal = submenu("终端", [
-            menuItem("新建终端窗口", key: "n") { [weak self] in self?.shell.newWindow() },
+            // ⌘N：在终端里是新建终端窗口；在其他窗口里打开笔记（选中了任务就打开它的笔记）。
+            menuItem("新建终端窗口 / 打开笔记", key: "n") { [weak self] in
+                guard let self else { return }
+                if NSApp.keyWindow is TerminalWindow { shell.newWindow() }
+                else if NSApp.keyWindow === NotesWindowController.shared.window { NotesWindowController.shared.close() }
+                else { commands.send(.notes) }
+            },
             menuItem("新建标签页", key: "t") { [weak self] in self?.shell.newTab() },
             menuItem("关闭标签页 / 窗口", key: "w") { [weak self] in self?.closeKeyWindow() },
             .separator(),

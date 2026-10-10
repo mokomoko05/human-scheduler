@@ -39,6 +39,14 @@ final class RadialMenuTests: XCTestCase {
         XCTAssertEqual(five[1] - five[0], five[2] - five[1], accuracy: 0.001)
     }
 
+    func testSixItemsDoNotOverlap() {
+        let count = 6
+        for index in 1..<count {
+            let a = RadialLayout.offset(index: index - 1, count: count), b = RadialLayout.offset(index: index, count: count)
+            XCTAssertGreaterThanOrEqual(hypot(a.width - b.width, a.height - b.height), RadialLayout.itemSize, "相邻两项不重叠")
+        }
+    }
+
     func testHitTestingFollowsTheItemsAndTheFanShape() {
         let count = 5
         for index in 0..<count {

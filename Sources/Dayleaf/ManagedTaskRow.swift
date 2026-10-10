@@ -8,6 +8,8 @@ struct ManagedTaskRow: View {
     @ObservedObject private var dragSession = TaskDragSession.shared
     @Environment(\.focusSession) private var focus
     @Environment(\.taskReorder) private var reorder
+    /// 主窗口的命令中心（搜索面板里的行没有它）。
+    @Environment(\.appCommands) private var commands
     let date: Date
     let task: Todo
     var compact = false
@@ -74,7 +76,7 @@ struct ManagedTaskRow: View {
                 if let focus, !task.completed {
                     FocusPlayButton(session: focus, task: ScheduledTask(date: date, task: task), url: FocusSession.link(in: task.title))
                 }
-                RadialMenuButton(items: { radialItems }, help: "更多操作：截止日期、标签、固定、放弃、删除")
+                RadialMenuButton(items: { radialItems }, help: "更多操作：笔记、截止日期、标签、固定、放弃、删除")
                     .popover(isPresented: $showingTags, arrowEdge: .leading) { TagPickerView(store: store, task: task) }
                 TaskDragHandle(task: task, enabled: !store.isReadOnly, select: { reorder?.suppressScroll = true; selectTask() }, reorder: reorder.map { model in
                     TaskReorderHooks(begin: { model.begin(task.id) }, update: { model.update($0) },
@@ -117,7 +119,14 @@ struct ManagedTaskRow: View {
 
     /// 环形菜单里的操作（也是右键菜单的内容）。
     private var radialItems: [RadialItem] {
+        let noteCount = store.notes(for: task.id).count
         var items: [RadialItem] = [
+            RadialItem(id: "notes", symbol: noteCount > 0 ? "note.text" : "square.and.pencil",
+                       title: noteCount > 0 ? "打开笔记（\(noteCount) 条）" : "写笔记", active: noteCount > 0, action: {
+                selectTask()
+                NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)
+                commands?.send(.notesForTask(task.id))
+            }),
             RadialItem(id: "date", symbol: "calendar.badge.clock", title: "截止日期与月历短标题", action: {
                 selectTask()
                 NotificationCenter.default.post(name: .dayleafCommitEditing, object: nil)

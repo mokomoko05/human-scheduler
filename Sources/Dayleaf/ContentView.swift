@@ -30,6 +30,8 @@ struct ContentView: View {
     @State private var scrollTarget: UUID?
     /// 点摘要里的数字时，要滚动到的分组（`overdue` / `today` 等）。
     @State private var scrollGroup: String?
+    /// 待办行的位置，用来判断一次点击是不是点在待办上（不是 @Published，更新它不会触发重绘）。
+    @State private var rowRegions = TaskRowRegions()
     @AppStorage(Prefs.hideCompleted) private var hideCompleted = false
     @AppStorage(Prefs.clickExpands) private var clickExpands = true
     @AppStorage(Prefs.weekStartsSunday) private var weekStartsSunday = false
@@ -76,6 +78,10 @@ struct ContentView: View {
         .foregroundStyle(Palette.ink)
         .tint(Palette.accent)
         .frame(minWidth: 640, minHeight: 560)
+        // 点了待办以外的地方（日历、空白、标题栏……）就取消选中。
+        .background(ClickAwayDeselect(regions: rowRegions, selection: { interaction.selectedTaskID }, deselect: {
+            interaction.selectedTaskID = nil
+        }))
         .overlay(alignment: .bottom) {
             ToastView(center: toast).padding(.bottom, footerVisible ? 52 : 18)
         }
@@ -139,8 +145,11 @@ struct ContentView: View {
     // MARK: - 命令
 
     /// 打开笔记窗口：指定标签就定位到标签；否则保持上次关闭时的样子（任务、标签、搜索词都不变），不再跟着清单里选中的任务跳。
-    private func showNotes(tag: String?) {
-        notesWindow.show(store: store, taskID: nil, tag: tag,
+    /// 打开笔记。`taskID` 指定就跳到那个任务（还没笔记也能直接写）；都不指定，就看清单里有没有选中的任务：
+    /// 有就打开它的笔记，没有就回到上次笔记停留的地方。
+    private func showNotes(tag: String?, taskID: UUID? = nil, followSelection: Bool = true) {
+        let target = taskID ?? (followSelection && tag == nil ? interaction.selectedTaskID.flatMap { store.locate($0)?.id } : nil)
+        notesWindow.show(store: store, taskID: target, tag: tag,
                          reveal: { id in reveal(date: store.locate(id)?.task.dueDate, taskID: id) },
                          openDay: { date in select(date); dayLogWindow.show(store: store, date: date) })
     }
@@ -161,6 +170,7 @@ struct ContentView: View {
         case .today: select(Date())
         case .search: agenda = .all
         case .notes: showNotes(tag: nil)
+        case .notesForTask(let id): showNotes(tag: nil, taskID: id)
         case .notesHotKey(let appWasActive):
             if !notesWindow.isVisible { showNotes(tag: nil) }
             else if appWasActive { notesWindow.close() }
@@ -441,6 +451,9 @@ struct ContentView: View {
                                                    next: { addingTodo = true }, select: { interaction.activePane = .tasks })
                                         .id(item.id)
                                         .taskReorderRow(id: item.id, model: reorder, space: "taskList")
+                                        .background(GeometryReader { proxy in
+                                            Color.clear.preference(key: TaskRowGlobalFramesKey.self, value: [item.id: proxy.frame(in: .global)])
+                                        })
                                 }
                             }
                             Color.clear.frame(height: 12)
@@ -448,7 +461,12 @@ struct ContentView: View {
                         .coordinateSpace(name: "taskList")
                         .environment(\.taskReorder, store.isReadOnly ? nil : reorder)
                         .onPreferenceChange(TaskRowFramesKey.self) { reorder.frames = $0 }
+                        .onPreferenceChange(TaskRowGlobalFramesKey.self) { rowRegions.rows = $0 }
                     }
+                    .background(GeometryReader { proxy in
+                        Color.clear.onAppear { rowRegions.viewport = proxy.frame(in: .global) }
+                            .onChange(of: proxy.frame(in: .global)) { rowRegions.viewport = $0 }
+                    })
                     .onChange(of: scrollTarget) { id in
                         if let id { withAnimation(Motion.quick) { proxy.scrollTo(id, anchor: .center) }; scrollTarget = nil }
                     }

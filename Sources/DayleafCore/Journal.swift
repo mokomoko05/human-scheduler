@@ -837,6 +837,41 @@ public final class JournalStore: ObservableObject {
         }.sorted { $0.lastActivity > $1.lastActivity }
     }
 
+    /// 某个任务的笔记主题：有笔记就是 `noteTopics()` 里那一项；还没有笔记、但任务还在，就给一个 0 条的主题，
+    /// 这样从清单里「打开笔记」总能落到这个任务的页面上，直接开始写。任务已删除且没有笔记时为 nil。
+    public func noteTopic(for id: UUID) -> NoteTopic? {
+        if let existing = noteTopics().first(where: { $0.id == id }) { return existing }
+        guard let located = locate(id) else { return nil }
+        return NoteTopic(id: id, number: located.task.number, title: String(TaskText.rendered(located.task.title).characters),
+                         count: 0, imageCount: 0, lastActivity: .distantPast,
+                         completed: located.task.completed, dropped: located.task.isDropped, deleted: false,
+                         dueDate: located.task.dueDate, focusSeconds: located.task.focusSeconds, tags: located.task.tags)
+    }
+
+    /// 一组可以左右翻看的图片：每张带上它来自哪条笔记（日期 + 正文开头）。
+    public struct GalleryImage: Equatable {
+        public let name: String
+        public let logID: UUID
+        public let caption: String
+    }
+
+    /// 和这条日志属于同一个任务的所有笔记里的图片，按时间顺序；日志没有关联任务时，就是它自己的图片。
+    public func galleryImages(around log: DailyLogEntry) -> [GalleryImage] {
+        let logs: [LoggedLog]
+        if let id = log.taskID { logs = notes(for: id) } else { logs = allLogs().filter { $0.log.id == log.id } }
+        return Self.gallery(of: logs)
+    }
+
+    /// 一组笔记里的所有图片（按传入的顺序）。
+    public static func gallery(of logs: [LoggedLog]) -> [GalleryImage] {
+        logs.flatMap { item -> [GalleryImage] in
+            let text = String(TaskText.rendered(item.log.text).characters).trimmingCharacters(in: .whitespacesAndNewlines)
+            let excerpt = text.count > 40 ? String(text.prefix(40)) + "…" : text
+            let caption = item.key + (excerpt.isEmpty ? "" : " · " + excerpt)
+            return item.log.images.map { GalleryImage(name: $0, logID: item.log.id, caption: caption) }
+        }
+    }
+
     // MARK: - 按任务筛选日志
 
     public struct LoggedLog: Identifiable {
